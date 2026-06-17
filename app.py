@@ -28,8 +28,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_Template.xlsm"
-TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_Template.xlsx"
+TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_template.xlsm"
+TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_template.xlsx"
 
 if TEMPLATE_XLSM_PATH.exists():
     TEMPLATE_PATH = TEMPLATE_XLSM_PATH
@@ -1582,107 +1582,230 @@ def resolve_line_item(pay_items, lookup_mode, selected_code, selected_descriptio
     return item
 
 
-def build_idr_rows_form(pay_items):
-    code_options = [""] + sorted(dataframe_records_by_code(pay_items).keys())
-    description_options = [""] + sorted(dataframe_records_by_description(pay_items).keys())
+def parse_number(value):
+    """Convert user/IDOT quantity text into a float. Returns None when it cannot be read."""
+    value = clean_line(value)
+    if not value:
+        return None
 
+    value = value.replace(",", "").replace("$", "")
+    value = re.sub(r"[^0-9.\-]", "", value)
+
+    if not value or value in [".", "-", "-."]:
+        return None
+
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_quantity_status(quantity, plan_quantity):
+    """
+    Website-only quantity status.
+    Red: entered quantity is over the permitted/plan quantity.
+    Yellow: entered quantity is at least 75% of permitted/plan quantity.
+    Green: entered quantity is below 75% of permitted/plan quantity.
+    """
+    entered = parse_number(quantity)
+    permitted = parse_number(plan_quantity)
+
+    if entered is None or permitted is None or permitted <= 0:
+        return {
+            "status": "",
+            "ratio": None,
+            "color": "",
+        }
+
+    ratio = entered / permitted
+
+    if entered > permitted:
+        status = f"OVER ({ratio:.0%})"
+        color = "#ffc7ce"
+    elif ratio >= 0.75:
+        status = f"Close ({ratio:.0%})"
+        color = "#ffeb9c"
+    else:
+        status = f"OK ({ratio:.0%})"
+        color = "#c6efce"
+
+    return {
+        "status": status,
+        "ratio": ratio,
+        "color": color,
+    }
+
+
+def empty_idr_table_df():
+    return pd.DataFrame([
+        {
+            "item_code": "",
+            "item_description": "",
+            "location": "",
+            "quantity": "",
+            "unit": "",
+        }
+        for _ in range(PDF_ROW_COUNT)
+    ])
+
+
+def resolve_table_row(pay_items, row):
+    by_code = dataframe_records_by_code(pay_items)
+    by_desc = dataframe_records_by_description(pay_items)
+
+    typed_code = normalize_pay_item_code(row.get("item_code", ""))
+    typed_desc = clean_line(row.get("item_description", ""))
+    typed_unit = normalize_unit(row.get("unit", ""))
+    location = clean_line(row.get("location", ""))
+    quantity = clean_line(row.get("quantity", ""))
+
+    # Official match by item code wins when the user typed a valid IDOT code.
+    official = by_code.get(typed_code)
+
+    # If there is no code match, try exact description match.
+    if official is None and typed_desc:
+        official = by_desc.get(typed_desc)
+
+    if official is not None:
+        resolved = official.copy()
+        resolved["location"] = location
+        resolved["quantity"] = quantity
+        resolved["unit"] = normalize_unit(resolved.get("unit", ""))
+        resolved["is_custom"] = False
+        return resolved
+
+    # No official match. Keep what the user typed as a custom pay item.
+    return {
+        "item_code": typed_code,
+        "item_description": typed_desc,
+        "unit": typed_unit,
+        "location": location,
+        "quantity": quantity,
+        "plan_quantity": "",
+        "unit_price": "",
+        "is_custom": bool(typed_code or typed_desc or typed_unit or location or quantity),
+    }
+
+
+def resolve_table_rows(pay_items, edited_df):
     rows = []
 
-    st.subheader("IDR Pay Item Rows")
-    st.caption("Each row can be filled by item code, by item description, or as a custom pay item. The website autofills the matching code, description, and unit before creating the PDF.")
+    for _, row in edited_df.head(PDF_ROW_COUNT).iterrows():
+        resolved = resolve_table_row(pay_items, row)
+        status = get_quantity_status(resolved.get("quantity", ""), resolved.get("plan_quantity", ""))
+        resolved["quantity_status"] = status["status"]
+        resolved["quantity_color"] = status["color"]
+        rows.append(resolved)
 
-    for idx in range(PDF_ROW_COUNT):
-        row_num = idx + 1
-        with st.expander(f"Pay Item Row {row_num}", expanded=(idx == 0)):
-            lookup_mode = st.radio(
-                "Fill this row by",
-                ["Item Code", "Item Description", "Custom Item"],
-                horizontal=True,
-                key=f"lookup_mode_{idx}",
-            )
-
-            selected_code = ""
-            selected_description = ""
-            custom_code = ""
-            custom_description = ""
-            custom_unit = ""
-
-            if lookup_mode == "Item Code":
-                selected_code = st.selectbox(
-                    "Item Code",
-                    code_options,
-                    key=f"selected_code_{idx}",
-                )
-                selected_item = dataframe_records_by_code(pay_items).get(selected_code, {})
-
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.text_input(
-                        "Autofilled Item Description",
-                        value=selected_item.get("item_description", ""),
-                        disabled=True,
-                        key=f"autofill_desc_from_code_{idx}",
-                    )
-                with c2:
-                    st.text_input(
-                        "Autofilled Unit",
-                        value=selected_item.get("unit", ""),
-                        disabled=True,
-                        key=f"autofill_unit_from_code_{idx}",
-                    )
-
-            elif lookup_mode == "Item Description":
-                selected_description = st.selectbox(
-                    "Item Description",
-                    description_options,
-                    key=f"selected_desc_{idx}",
-                )
-                selected_item = dataframe_records_by_description(pay_items).get(selected_description, {})
-
-                c1, c2 = st.columns([1, 1])
-                with c1:
-                    st.text_input(
-                        "Autofilled Item Code",
-                        value=selected_item.get("item_code", ""),
-                        disabled=True,
-                        key=f"autofill_code_from_desc_{idx}",
-                    )
-                with c2:
-                    st.text_input(
-                        "Autofilled Unit",
-                        value=selected_item.get("unit", ""),
-                        disabled=True,
-                        key=f"autofill_unit_from_desc_{idx}",
-                    )
-
-            else:
-                c1, c2, c3 = st.columns([1, 3, 1])
-                with c1:
-                    custom_code = st.text_input("Custom Item Code", key=f"custom_code_{idx}")
-                with c2:
-                    custom_description = st.text_input("Custom Item Description", key=f"custom_desc_{idx}")
-                with c3:
-                    custom_unit = st.text_input("Custom Unit", key=f"custom_unit_{idx}")
-
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                location = st.text_input("Location", key=f"location_{idx}")
-            with c2:
-                quantity = st.text_input("Quantity Used", key=f"quantity_{idx}")
-
-            rows.append(resolve_line_item(
-                pay_items=pay_items,
-                lookup_mode=lookup_mode,
-                selected_code=selected_code,
-                selected_description=selected_description,
-                custom_code=custom_code,
-                custom_description=custom_description,
-                custom_unit=custom_unit,
-                location=location,
-                quantity=quantity,
-            ))
+    while len(rows) < PDF_ROW_COUNT:
+        rows.append(resolve_table_row(pay_items, {}))
 
     return rows
+
+
+def rows_to_editor_df(rows):
+    data = []
+
+    for row in rows[:PDF_ROW_COUNT]:
+        data.append({
+            "item_code": clean_line(row.get("item_code", "")),
+            "item_description": clean_line(row.get("item_description", "")),
+            "location": clean_line(row.get("location", "")),
+            "quantity": clean_line(row.get("quantity", "")),
+            "unit": clean_line(row.get("unit", "")),
+        })
+
+    while len(data) < PDF_ROW_COUNT:
+        data.append({
+            "item_code": "",
+            "item_description": "",
+            "location": "",
+            "quantity": "",
+            "unit": "",
+        })
+
+    return pd.DataFrame(data)
+
+
+def style_quantity_status(row):
+    color = row.get("quantity_color", "")
+    styles = ["" for _ in row.index]
+
+    if color:
+        for i, column_name in enumerate(row.index):
+            if column_name in ["quantity", "quantity_status"]:
+                styles[i] = f"background-color: {color};"
+
+    return styles
+
+
+def build_idr_rows_form(pay_items):
+    st.subheader("IDR Pay Item Rows")
+    st.caption(
+        "Edit the six rows like the Excel form. Type an item code or an exact item description; "
+        "the website resolves the matching code, description, and unit before creating the PDF. "
+        "Unmatched rows are treated as custom pay items."
+    )
+
+    if "idr_table_rows" not in st.session_state:
+        st.session_state.idr_table_rows = empty_idr_table_df()
+
+    edited_df = st.data_editor(
+        st.session_state.idr_table_rows,
+        num_rows="fixed",
+        hide_index=True,
+        use_container_width=True,
+        key="idr_line_item_table_editor",
+        column_config={
+            "item_code": st.column_config.TextColumn("Item Code", width="small"),
+            "item_description": st.column_config.TextColumn("Item Description", width="large"),
+            "location": st.column_config.TextColumn("Location", width="medium"),
+            "quantity": st.column_config.TextColumn("Quantity", width="small"),
+            "unit": st.column_config.TextColumn("Unit", width="small"),
+        },
+    )
+
+    resolved_rows = resolve_table_rows(pay_items, edited_df)
+    resolved_editor_df = rows_to_editor_df(resolved_rows)
+
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button("Autofill Table", use_container_width=True):
+            st.session_state.idr_table_rows = resolved_editor_df
+            st.rerun()
+    with c2:
+        st.caption("After typing a code or description, click Autofill Table to push the matched values back into the editable table. The PDF always uses the resolved values shown below.")
+
+    preview_df = pd.DataFrame([
+        {
+            "item_code": row.get("item_code", ""),
+            "item_description": row.get("item_description", ""),
+            "location": row.get("location", ""),
+            "quantity": row.get("quantity", ""),
+            "unit": row.get("unit", ""),
+            "plan_quantity": row.get("plan_quantity", ""),
+            "quantity_status": row.get("quantity_status", ""),
+            "quantity_color": row.get("quantity_color", ""),
+        }
+        for row in resolved_rows
+    ])
+
+    display_preview_df = preview_df.drop(columns=["quantity_color"])
+    st.dataframe(
+        display_preview_df.style.apply(style_quantity_status, axis=1),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    # The PDF should not include the website-only color/status helper values.
+    pdf_rows = []
+    for row in resolved_rows:
+        clean_row = row.copy()
+        clean_row.pop("quantity_status", None)
+        clean_row.pop("quantity_color", None)
+        pdf_rows.append(clean_row)
+
+    return pdf_rows
 
 
 def wrap_text_to_lines(text, max_chars, max_lines):
