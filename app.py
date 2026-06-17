@@ -1964,6 +1964,51 @@ def format_item_description_cells(ws):
         )
         anchor_cell.font = make_font_with_size(anchor_cell.font, font_size)
 
+def format_quantity_cells(ws):
+    """
+    Give the quantity/unit cells a little breathing room so the left edge
+    of the number does not get clipped in the exported PDF.
+
+    The template stores the visible quantity box around H13:H18. LibreOffice
+    PDF export can render left-aligned text too tight against the border,
+    so we keep the same Excel layout but center the value vertically and
+    add a small indent.
+    """
+    for row in range(13, 19):
+        visible_cell_address = f"H{row}"
+        anchor_cell_address = get_merged_anchor_cell(ws, visible_cell_address)
+        anchor_cell = ws[anchor_cell_address]
+        current_alignment = copy(anchor_cell.alignment)
+
+        anchor_cell.alignment = Alignment(
+            horizontal="left",
+            vertical=current_alignment.vertical or "center",
+            text_rotation=current_alignment.text_rotation,
+            wrap_text=current_alignment.wrap_text,
+            shrink_to_fit=False,
+            indent=1,
+            relativeIndent=current_alignment.relativeIndent,
+            justifyLastLine=current_alignment.justifyLastLine,
+            readingOrder=current_alignment.readingOrder,
+        )
+
+        # Apply the same alignment across a merged quantity range if H is merged.
+        for merged_range in ws.merged_cells.ranges:
+            if visible_cell_address in merged_range:
+                for cell_row in ws.iter_rows(
+                    min_row=merged_range.min_row,
+                    max_row=merged_range.max_row,
+                    min_col=merged_range.min_col,
+                    max_col=merged_range.max_col,
+                ):
+                    for range_cell in cell_row:
+                        try:
+                            range_cell.alignment = copy(anchor_cell.alignment)
+                        except Exception:
+                            pass
+                break
+
+
 def unmerge_range_keep_style(ws, range_coord):
     target = None
     for merged_range in list(ws.merged_cells.ranges):
@@ -2001,7 +2046,8 @@ def prepare_exact_print_layout(wb, ws):
 
     ws.print_area = "B2:N30"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_setup.orientation = "portrait"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
     ws.page_margins.left = 0.25
@@ -2098,6 +2144,11 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     try:
         format_item_description_cells(ws)
+    except Exception:
+        pass
+
+    try:
+        format_quantity_cells(ws)
     except Exception:
         pass
 
