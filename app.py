@@ -28,13 +28,11 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_Template.xlsm"
-TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_Template.xlsx"
-
-if TEMPLATE_XLSM_PATH.exists():
-    TEMPLATE_PATH = TEMPLATE_XLSM_PATH
-else:
-    TEMPLATE_PATH = TEMPLATE_XLSX_PATH
+TEMPLATE_CANDIDATES = [
+    BASE_DIR / "IDR_Template.xlsx",
+    BASE_DIR / "IDR_Template.xlsx",
+]
+TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
 
 BASE_URL = "https://webapps1.dot.illinois.gov"
 IDOT_HOME_URL = "https://webapps1.dot.illinois.gov/WCTB/LBHome"
@@ -1902,22 +1900,178 @@ def clear_old_idr_values(ws):
         safe_set(ws, f"{CELL_MAP['unit_col']}{row}", None)
 
 
-def fill_idr_template(metadata, pay_items, selected_rows):
-    wb = load_workbook(TEMPLATE_PATH, keep_vba=(TEMPLATE_PATH.suffix.lower() == ".xlsm"))
 
+def prepare_pay_items_for_lookup(pay_items):
+    """Normalize the IDOT pay-item table so Streamlit can replace the VBA lookup behavior."""
+    if pay_items is None or pay_items.empty:
+        return pd.DataFrame(columns=["item_code", "unit", "item_description", "quantity", "unit_price"])
+
+    df = pay_items.copy()
+
+    for col in ["item_code", "unit", "item_description", "quantity", "unit_price"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["item_code"] = df["item_code"].astype(str).map(clean_line).str.upper()
+    df["unit"] = df["unit"].astype(str).map(clean_line).str.upper().map(normalize_unit)
+    df["item_description"] = df["item_description"].astype(str).map(clean_line)
+    df["quantity"] = df["quantity"].astype(str).map(clean_line)
+    df["unit_price"] = df["unit_price"].astype(str).map(clean_line)
+
+    df = df[df["item_code"] != ""]
+    df = df.drop_duplicates(subset=["item_code"], keep="first").reset_index(drop=True)
+    return df[["item_code", "unit", "item_description", "quantity", "unit_price"]]
+
+
+def make_blank_idr_rows(row_count=6):
+    rows = []
+
+    for _ in range(row_count):
+        rows.append({
+            "custom_item": False,
+            "item_code": "",
+            "item_description": "",
+            "location": "",
+            "quantity": "",
+            "unit": "",
+        })
+
+    return pd.DataFrame(rows)
+
+
+def resolve_idr_rows(input_rows, pay_items):
+    """
+    Replace the old Worksheet_Change macro behavior.
+
+    - If custom_item is checked, keep the user's code/description/unit.
+    - If item_code matches IDOT, fill official description and unit.
+    - If description matches IDOT, fill official code and unit.
+    - If no match, keep user-entered values as a custom row.
+    """
+    pay_items = prepare_pay_items_for_lookup(pay_items)
+
+    by_code = {}
+    by_description = {}
+
+    for _, row in pay_items.iterrows():
+        code_key = normalize_pay_item_code(row.get("item_code", ""))
+        desc_key = clean_line(row.get("item_description", "")).lower()
+
+        if code_key:
+            by_code[code_key] = row
+
+        if desc_key:
+            by_description[desc_key] = row
+
+    resolved_rows = []
+
+    if input_rows is None or input_rows.empty:
+        input_rows = make_blank_idr_rows()
+
+    for _, user_row in input_rows.iterrows():
+        custom_item = bool(user_row.get("custom_item", False))
+        entered_code = normalize_pay_item_code(user_row.get("item_code", ""))
+        entered_description = clean_line(user_row.get("item_description", ""))
+        entered_location = clean_line(user_row.get("location", ""))
+        entered_quantity = clean_line(user_row.get("quantity", ""))
+        entered_unit = normalize_unit(user_row.get("unit", ""))
+
+        if not any([entered_code, entered_description, entered_location, entered_quantity, entered_unit]):
+            continue
+
+        matched = None
+
+        if not custom_item and entered_code in by_code:
+            matched = by_code[entered_code]
+        elif not custom_item and entered_description.lower() in by_description:
+            matched = by_description[entered_description.lower()]
+
+        if matched is not None:
+            resolved_rows.append({
+                "custom_item": False,
+                "item_code": matched.get("item_code", entered_code),
+                "item_description": matched.get("item_description", entered_description),
+                "location": entered_location,
+                "quantity": entered_quantity,
+                "unit": matched.get("unit", entered_unit),
+                "plan_quantity": matched.get("quantity", ""),
+                "unit_price": matched.get("unit_price", ""),
+            })
+        else:
+            resolved_rows.append({
+                "custom_item": True,
+                "item_code": entered_code,
+                "item_description": entered_description,
+                "location": entered_location,
+                "quantity": entered_quantity,
+                "unit": entered_unit,
+                "plan_quantity": "",
+                "unit_price": "",
+            })
+
+    return pd.DataFrame(resolved_rows, columns=[
+        "custom_item",
+        "item_code",
+        "item_description",
+        "location",
+        "quantity",
+        "unit",
+        "plan_quantity",
+        "unit_price",
+    ])
+
+
+def apply_manual_quantity_colors(ws, resolved_rows):
+    """Apply the old quantity warning colors directly instead of relying on macro/formula behavior."""
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    for i, (_, row_data) in enumerate(resolved_rows.iterrows()):
+        excel_row = CELL_MAP["start_row"] + i
+        qty_cell = ws[f"{CELL_MAP['quantity_col']}{excel_row}"]
+
+        try:
+            entered_qty = float(str(row_data.get("quantity", "")).replace(",", ""))
+            plan_qty = float(str(row_data.get("plan_quantity", "")).replace(",", ""))
+        except Exception:
+            continue
+
+        if plan_qty <= 0:
+            continue
+
+        if entered_qty > plan_qty:
+            qty_cell.fill = red_fill
+        elif entered_qty >= plan_qty * 0.9:
+            qty_cell.fill = yellow_fill
+        else:
+            qty_cell.fill = green_fill
+
+
+def fill_idr_template(metadata, pay_items, idr_inputs, idr_rows):
+    """Create a finished macro-free .xlsx IDR using Python instead of VBA macros."""
+    wb = load_workbook(TEMPLATE_PATH, keep_vba=False)
     ws = wb["IDR_Form"] if "IDR_Form" in wb.sheetnames else wb.active
 
     clear_old_idr_values(ws)
 
-    safe_set(ws, CELL_MAP["date"], "")
+    safe_set(ws, CELL_MAP["date"], idr_inputs.get("date", ""))
 
-    # Keep the Contractor/Subcontractor label on the Excel sheet.
-    # Do not clear the contractor cell if it shares a merged range with the label.
+    contractor_text = idr_inputs.get("contractor", "")
     write_contractor_section(ws)
 
-    safe_set(ws, CELL_MAP["work_description"], "")
-    safe_set(ws, CELL_MAP["weather"], "")
-    safe_set(ws, CELL_MAP["remarks"], "")
+    label_anchor = get_effective_cell_address(ws, CELL_MAP["contractor_label"])
+    contractor_anchor = get_effective_cell_address(ws, CELL_MAP["contractor"])
+
+    if contractor_text:
+        if label_anchor == contractor_anchor:
+            safe_set(ws, CELL_MAP["contractor_label"], f"{CONTRACTOR_LABEL_TEXT}: {contractor_text}")
+        else:
+            safe_set(ws, CELL_MAP["contractor"], contractor_text)
+
+    safe_set(ws, CELL_MAP["work_description"], idr_inputs.get("work_description", ""))
+    safe_set(ws, CELL_MAP["weather"], idr_inputs.get("weather", ""))
+    safe_set(ws, CELL_MAP["remarks"], idr_inputs.get("remarks", ""))
 
     safe_set(ws, CELL_MAP["county"], metadata.get("county", ""))
     safe_set(ws, CELL_MAP["section"], metadata.get("key_route", ""))
@@ -1929,31 +2083,26 @@ def fill_idr_template(metadata, pay_items, selected_rows):
 
     delete_sheet_if_exists(wb, OLD_MATERIALS_SHEET_NAME)
 
+    pay_items = prepare_pay_items_for_lookup(pay_items)
+    resolved_rows = resolve_idr_rows(idr_rows, pay_items)
+
+    # Include hidden source data for traceability, but do not use formulas or macros.
     write_job_info_sheet(wb, metadata)
     write_hidden_pay_items_sheet(wb, pay_items)
 
     max_rows = CELL_MAP["end_row"] - CELL_MAP["start_row"] + 1
-    selected_rows = selected_rows.head(max_rows)
+    resolved_rows = resolved_rows.head(max_rows)
 
-    for i, (_, row_data) in enumerate(selected_rows.iterrows()):
+    for i, (_, row_data) in enumerate(resolved_rows.iterrows()):
         excel_row = CELL_MAP["start_row"] + i
 
-        # User can select/change either item code or item description in Excel.
-        # The xlsm macro in the template handles the two-way sync.
         safe_set(ws, f"{CELL_MAP['item_code_col']}{excel_row}", row_data.get("item_code", ""))
         safe_set(ws, f"{CELL_MAP['item_description_col']}{excel_row}", row_data.get("item_description", ""))
+        safe_set(ws, f"{CELL_MAP['location_col']}{excel_row}", row_data.get("location", ""))
+        safe_set(ws, f"{CELL_MAP['quantity_col']}{excel_row}", row_data.get("quantity", ""))
+        safe_set(ws, f"{CELL_MAP['unit_col']}{excel_row}", row_data.get("unit", ""))
 
-        # Unit is auto-filled by formula only.
-        safe_set(ws, f"{CELL_MAP['unit_col']}{excel_row}", "")
-
-        # Quantity is intentionally blank. User fills actual used quantity.
-        safe_set(ws, f"{CELL_MAP['quantity_col']}{excel_row}", "")
-
-    apply_item_code_dropdown(ws, len(pay_items))
-    apply_description_dropdown(ws, len(pay_items))
-    add_lookup_formulas_for_blank_rows(ws, len(pay_items))
-    apply_quantity_conditional_formatting(ws, len(pay_items))
-
+    apply_manual_quantity_colors(ws, resolved_rows)
     format_item_description_cells(ws)
 
     unlock_all_cells(ws)
@@ -1973,7 +2122,7 @@ def fill_idr_template(metadata, pay_items, selected_rows):
     wb.save(output)
     output.seek(0)
 
-    return output
+    return output, resolved_rows
 
 
 def make_pay_items_excel(metadata, pay_items):
@@ -2031,7 +2180,8 @@ st.title("IDOT Job IDR Generator")
 
 st.write(
     "Enter an IDOT job/contract number or paste the direct IDOT contract URL. "
-    "The app pulls the job information and pay items, then creates a job-specific IDR draft."
+    "The app pulls the job information and pay items, lets you complete the IDR online, "
+    "then creates a macro-free .xlsx file."
 )
 
 with st.sidebar:
@@ -2041,6 +2191,8 @@ with st.sidebar:
         "IDOT Job / Contract Number or Contract Detail URL",
         placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
     )
+
+    st.caption("The downloaded IDR is .xlsx only. No VBA macros are needed.")
 
 
 if "metadata" not in st.session_state:
@@ -2052,21 +2204,25 @@ if "pay_items" not in st.session_state:
 if "match" not in st.session_state:
     st.session_state.match = None
 
+if "idr_rows" not in st.session_state:
+    st.session_state.idr_rows = make_blank_idr_rows()
+
 if st.button("Find IDOT Job"):
     try:
         if not TEMPLATE_PATH.exists():
             st.error(
                 f"Template file not found.\n\n"
-                f"Put IDR_template.xlsm or IDR_template.xlsx in the same folder as this app file.\n\n"
-                f"Expected location:\n{TEMPLATE_PATH}"
+                f"Put IDR_template.xlsx in the same folder as this app file.\n\n"
+                "Expected one of:\n" + "\n".join(str(path) for path in TEMPLATE_CANDIDATES)
             )
         else:
             with st.spinner("Searching IDOT Transportation Bulletin archives newest to oldest..."):
                 metadata, pay_items, match = fetch_idot_job(job_number)
 
             st.session_state.metadata = metadata
-            st.session_state.pay_items = pay_items
+            st.session_state.pay_items = prepare_pay_items_for_lookup(pay_items)
             st.session_state.match = match
+            st.session_state.idr_rows = make_blank_idr_rows()
 
             st.success(
                 f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items."
@@ -2105,11 +2261,25 @@ if metadata is not None:
         st.warning(
             "Some job fields did not parse correctly: "
             + ", ".join(missing_fields)
-            + ". Do not generate the IDR until these fields show correctly."
+            + ". You can correct them below before generating the IDR."
         )
 
-        with st.expander("Parser debug info"):
-            st.write(metadata)
+    with st.expander("Review / edit auto-filled job fields", expanded=bool(missing_fields)):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            metadata["county"] = st.text_input("County", metadata.get("county", ""))
+            metadata["key_route"] = st.text_input("Section / Key Route", metadata.get("key_route", ""))
+            metadata["marked_route"] = st.text_input("Route / Marked Route", metadata.get("marked_route", ""))
+
+        with c2:
+            metadata["district"] = st.text_input("District", metadata.get("district", ""))
+            metadata["item_contract"] = st.text_input("Contract No.", metadata.get("item_contract", ""))
+            metadata["state_job"] = st.text_input("Job No.", metadata.get("state_job", ""))
+
+        with c3:
+            metadata["federal_project"] = st.text_input("Project", metadata.get("federal_project", ""))
+            metadata["working_days"] = st.text_input("Working Days", metadata.get("working_days", ""))
 
     col1, col2, col3 = st.columns(3)
 
@@ -2127,34 +2297,72 @@ if metadata is not None:
         st.write(f"**Project:** {metadata.get('federal_project', '')}")
         st.write(f"**Working Days:** {metadata.get('working_days', '')}")
 
-if not pay_items.empty:
-    st.subheader("Pay Items Pulled from IDOT")
+if metadata is not None and not pay_items.empty:
+    st.subheader("IDR Header Fields")
+
+    header_col1, header_col2 = st.columns(2)
+
+    with header_col1:
+        idr_date = st.date_input("Date")
+        contractor = st.text_input("Contractor or Subcontractor")
+        work_description = st.text_area("Work Description", height=90)
+
+    with header_col2:
+        weather = st.selectbox(
+            "Weather",
+            ["", "Sunny", "Cloudy", "Light rain", "Normal rain", "Heavy rain", "Snow"],
+        )
+        remarks = st.text_area("Remarks / Notes", height=140)
+
+    st.subheader("IDR Pay Item Lines")
 
     st.write(
-        "Select the material rows you want to place on the visible IDR draft. "
-        "Only the first 6 selected rows fit on this printed IDR form."
+        "Fill up to 6 IDR lines. Enter either an IDOT item code or item description and the app will fill the matching fields. "
+        "For non-IDOT/custom work, check Custom Item and enter the code, description, and unit yourself."
     )
 
-    pay_items_display = pay_items.copy()
-    pay_items_display.insert(0, "use_on_idr", False)
-
-    edited_items = st.data_editor(
-        pay_items_display,
+    edited_idr_rows = st.data_editor(
+        st.session_state.idr_rows,
+        key="idr_line_editor",
         num_rows="fixed",
         use_container_width=True,
         column_config={
-            "use_on_idr": st.column_config.CheckboxColumn("Use on IDR"),
-            "item_code": st.column_config.TextColumn("Item Code"),
-            "unit": st.column_config.TextColumn("Unit / UOM"),
-            "item_description": st.column_config.TextColumn("Description"),
-            "quantity": st.column_config.TextColumn("Plan Quantity"),
-            "unit_price": st.column_config.TextColumn("Unit Price"),
+            "custom_item": st.column_config.CheckboxColumn(
+                "Custom Item",
+                help="Check this when the item is not in the IDOT pay-item table.",
+            ),
+            "item_code": st.column_config.TextColumn(
+                "Item Code / ID",
+                help="Type an official IDOT code to autofill description/unit, or type a custom ID.",
+            ),
+            "item_description": st.column_config.TextColumn(
+                "Item Description",
+                help="Type an official description to autofill code/unit, or type a custom description.",
+            ),
+            "location": st.column_config.TextColumn("Location"),
+            "quantity": st.column_config.TextColumn("Quantity Used"),
+            "unit": st.column_config.TextColumn(
+                "Unit",
+                help="Filled automatically for official IDOT items. Type this yourself for custom items.",
+            ),
         },
     )
 
-    selected_rows = edited_items[edited_items["use_on_idr"] == True].drop(
-        columns=["use_on_idr"]
-    )
+    resolved_preview = resolve_idr_rows(edited_idr_rows, pay_items)
+
+    if len(resolved_preview) > 6:
+        st.warning("Only the first 6 nonblank IDR lines will be placed on the printed IDR form.")
+
+    with st.expander("Preview resolved IDR rows before download", expanded=True):
+        st.dataframe(
+            resolved_preview[["item_code", "item_description", "location", "quantity", "unit", "custom_item"]],
+            use_container_width=True,
+        )
+
+    st.subheader("Pay Items Pulled from IDOT")
+
+    with st.expander("View full IDOT pay-item table"):
+        st.dataframe(pay_items, use_container_width=True)
 
     col_a, col_b = st.columns(2)
 
@@ -2169,26 +2377,35 @@ if not pay_items.empty:
         )
 
     with col_b:
+        idr_inputs = {
+            "date": idr_date.strftime("%m/%d/%Y") if idr_date else "",
+            "contractor": contractor,
+            "work_description": work_description,
+            "weather": weather,
+            "remarks": remarks,
+        }
+
         if st.button("Generate IDR Draft Excel"):
             try:
                 if not TEMPLATE_PATH.exists():
                     st.error(
                         f"Template file not found.\n\n"
-                        f"Put IDR_template.xlsm or IDR_template.xlsx in the same folder as this app file.\n\n"
-                        f"Expected location:\n{TEMPLATE_PATH}"
+                        f"Put IDR_template.xlsx in the same folder as this app file.\n\n"
+                        "Expected one of:\n" + "\n".join(str(path) for path in TEMPLATE_CANDIDATES)
                     )
                 else:
-                    output = fill_idr_template(
+                    output, _ = fill_idr_template(
                         metadata=metadata,
                         pay_items=pay_items,
-                        selected_rows=selected_rows,
+                        idr_inputs=idr_inputs,
+                        idr_rows=edited_idr_rows,
                     )
 
                     st.download_button(
-                        label="Download IDR Draft",
+                        label="Download Macro-Free IDR Draft (.xlsx)",
                         data=output,
-                        file_name=f"{metadata.get('item_contract', 'IDOT')}_IDR_Draft.xlsm" if TEMPLATE_PATH.suffix.lower() == ".xlsm" else f"{metadata.get('item_contract', 'IDOT')}_IDR_Draft.xlsx",
-                        mime="application/vnd.ms-excel.sheet.macroEnabled.12" if TEMPLATE_PATH.suffix.lower() == ".xlsm" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        file_name=f"{metadata.get('item_contract', 'IDOT')}_IDR_Draft.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
 
             except Exception as e:
