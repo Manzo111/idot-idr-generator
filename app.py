@@ -2,8 +2,6 @@ import io
 import re
 from copy import copy
 from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from urllib.parse import (
     urljoin,
     urlparse,
@@ -30,8 +28,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_Template.xlsm"
-TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_Template.xlsx"
+TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_template.xlsm"
+TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_template.xlsx"
 
 if TEMPLATE_XLSM_PATH.exists():
     TEMPLATE_PATH = TEMPLATE_XLSM_PATH
@@ -45,8 +43,6 @@ HIDDEN_PAY_ITEMS_SHEET_NAME = "IDOT_Pay_Items"
 JOB_INFO_SHEET_NAME = "IDOT_Job_Info"
 OLD_MATERIALS_SHEET_NAME = "Materials Data"
 
-APP_TIMEZONE = "America/Chicago"
-IDR_DATE_FORMAT = "m/d/yyyy"
 
 SEARCH_MAX_PAGES_PER_LETTING = 25
 
@@ -1522,45 +1518,6 @@ def safe_set(ws, cell, value):
         raise ValueError(f"Could not write value '{value}' to cell {cell}: {e}")
 
 
-
-
-def get_today_for_idr():
-    """Return today's date using Chicago time, not the cloud server's UTC date."""
-    return datetime.now(ZoneInfo(APP_TIMEZONE)).date()
-
-
-def set_idr_dates(ws):
-    """
-    Put today's date into the visible IDR date cell and the printed bottom-left footer.
-
-    The top date cell is controlled by CELL_MAP["date"].
-    The footer line fixes templates that still have an old printed date in the bottom-left.
-    """
-    today = get_today_for_idr()
-    display_date = today.strftime("%m/%d/%Y").lstrip("0").replace("/0", "/")
-
-    date_cell_address = get_merged_anchor_cell(ws, CELL_MAP["date"])
-    ws[date_cell_address] = today
-    ws[date_cell_address].number_format = IDR_DATE_FORMAT
-
-    current_alignment = copy(ws[date_cell_address].alignment)
-    ws[date_cell_address].alignment = Alignment(
-        horizontal=current_alignment.horizontal or "left",
-        vertical=current_alignment.vertical or "center",
-        text_rotation=current_alignment.text_rotation,
-        wrap_text=current_alignment.wrap_text,
-        shrink_to_fit=current_alignment.shrink_to_fit,
-        indent=current_alignment.indent,
-        relativeIndent=current_alignment.relativeIndent,
-        justifyLastLine=current_alignment.justifyLastLine,
-        readingOrder=current_alignment.readingOrder,
-    )
-
-    # Excel print footer. This is the date that appears at the bottom-left when opened/printed.
-    ws.oddFooter.left.text = display_date
-    ws.evenFooter.left.text = display_date
-    ws.firstFooter.left.text = display_date
-
 def unlock_all_cells(ws):
     for row in ws.iter_rows():
         for cell in row:
@@ -1952,7 +1909,7 @@ def fill_idr_template(metadata, pay_items, selected_rows):
 
     clear_old_idr_values(ws)
 
-    set_idr_dates(ws)
+    safe_set(ws, CELL_MAP["date"], "")
 
     # Keep the Contractor/Subcontractor label on the Excel sheet.
     # Do not clear the contractor cell if it shares a merged range with the label.
