@@ -1732,7 +1732,7 @@ def build_idr_header_form():
             - **Inspected by / Measured by / Calculated by / Checked by** → prints in the signature/initial boxes on the right side of the form.
             - **This is** → checks either Estimated Progress Measurement or Final Field Measurement.
             - **Estimated item no. / Final item no.** → prints inside the parentheses beside the selected measurement checkbox.
-            - **Remarks** → prints in the Remarks box near the bottom of the form.
+            - **Remarks** → prints in the expanded Remarks box under the measurement section.
             """
         )
 
@@ -2044,7 +2044,7 @@ def prepare_exact_print_layout(wb, ws):
         if sheet.title != ws.title:
             sheet.sheet_state = "hidden"
 
-    ws.print_area = "B2:N30"
+    ws.print_area = "A2:N30"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
@@ -2058,16 +2058,155 @@ def prepare_exact_print_layout(wb, ws):
     ws.page_margins.footer = 0
 
 
+def copy_cell_style(source_cell, target_cell):
+    """Copy the visible Excel style from one cell to another."""
+    target_cell.font = copy(source_cell.font)
+    target_cell.fill = copy(source_cell.fill)
+    target_cell.border = copy(source_cell.border)
+    target_cell.alignment = copy(source_cell.alignment)
+    target_cell.number_format = source_cell.number_format
+    target_cell.protection = copy(source_cell.protection)
+
+
+def rebuild_bottom_section_layout(ws):
+    """
+    Move the measurement checkbox section directly under the pay item table,
+    expand the remarks area, and place the footer text where requested.
+
+    New bottom layout:
+    - Rows 19-20: "This is" measurement checkboxes
+    - Rows 21-29: larger remarks box
+    - A30: printed date
+    - M30: BC 628 revision text
+    """
+    # Save styles before unmerging/clearing the old template area.
+    label_style_source = ws["B21"]
+    checkbox_style_source = ws["C21"]
+    measurement_text_style_source = ws["D21"]
+    close_paren_style_source = ws["H21"]
+    remarks_label_style_source = ws["B25"]
+    remarks_box_style_source = ws["C25"]
+    footer_left_style_source = ws["B30"]
+    footer_right_style_source = ws["N30"]
+
+    # Remove old and possible regenerated merges in the bottom area.
+    for range_coord in [
+        "D21:G21", "D23:G23", "C25:N29",
+        "D19:G19", "D20:G20", "C21:N29",
+        "A30:D30", "M30:N30",
+    ]:
+        try:
+            unmerge_range_keep_style(ws, range_coord)
+        except Exception:
+            pass
+
+    # Clear old bottom values. Keep row heights/columns from the original template.
+    for row in range(19, 30):
+        for col in range(1, 15):
+            ws.cell(row=row, column=col).value = None
+
+    for col in range(1, 15):
+        ws.cell(row=30, column=col).value = None
+
+    # Rebuild the moved measurement section.
+    safe_set(ws, "B19", "This is:")
+    safe_set(ws, "C19", "☐")
+    safe_set(ws, "D19", "an estimated progress measurement (item no.:")
+    safe_set(ws, "H19", ")")
+    safe_set(ws, "C20", "☐")
+    safe_set(ws, "D20", "a final field measurement (item no.:")
+    safe_set(ws, "H20", ")")
+
+    # Rebuild the larger remarks section.
+    safe_set(ws, "B21", "Remarks:")
+    safe_set(ws, "C21", "")
+
+    # Footer values are filled later, but the display cells are moved here.
+    safe_set(ws, "A30", "")
+    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
+
+    # Recreate merged regions for long text.
+    try:
+        ws.merge_cells("D19:G19")
+    except Exception:
+        pass
+    try:
+        ws.merge_cells("D20:G20")
+    except Exception:
+        pass
+    try:
+        ws.merge_cells("C21:N29")
+    except Exception:
+        pass
+    try:
+        ws.merge_cells("A30:D30")
+    except Exception:
+        pass
+    try:
+        ws.merge_cells("M30:N30")
+    except Exception:
+        pass
+
+    # Apply styles to the moved section.
+    for cell_addr in ["B19"]:
+        copy_cell_style(label_style_source, ws[cell_addr])
+
+    for cell_addr in ["C19", "C20"]:
+        copy_cell_style(checkbox_style_source, ws[cell_addr])
+
+    for cell_addr in ["D19", "D20"]:
+        copy_cell_style(measurement_text_style_source, ws[cell_addr])
+        ws[cell_addr].alignment = Alignment(
+            horizontal=ws[cell_addr].alignment.horizontal or "left",
+            vertical=ws[cell_addr].alignment.vertical or "center",
+            wrap_text=False,
+        )
+
+    for cell_addr in ["H19", "H20"]:
+        copy_cell_style(close_paren_style_source, ws[cell_addr])
+
+    copy_cell_style(remarks_label_style_source, ws["B21"])
+
+    # Style the expanded remarks merged box.
+    remarks_anchor = ws["C21"]
+    copy_cell_style(remarks_box_style_source, remarks_anchor)
+    remarks_anchor.alignment = Alignment(
+        horizontal="left",
+        vertical="top",
+        wrap_text=True,
+        shrink_to_fit=False,
+    )
+
+    for row in range(21, 30):
+        for col in range(3, 15):
+            try:
+                copy_cell_style(remarks_anchor, ws.cell(row=row, column=col))
+            except Exception:
+                pass
+
+    # Footer styling. A30/M30 are merged anchors.
+    copy_cell_style(footer_left_style_source, ws["A30"])
+    ws["A30"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    copy_cell_style(footer_right_style_source, ws["M30"])
+    ws["M30"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+
+
+
 def clear_exact_idr_values(ws):
     # Header values only - do not clear labels.
-    for cell in ["C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "C25", "H21", "H23"]:
+    for cell in [
+        "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
+        "L2", "L3", "L4", "L5", "L6", "L7", "L8",
+        "C21", "H19", "H20", "A30", "M30",
+    ]:
         safe_set(ws, cell, "")
 
-    # Restore checkboxes and closing parentheses.
-    safe_set(ws, "C21", "☐")
-    safe_set(ws, "C23", "☐")
-    safe_set(ws, "H21", ")")
-    safe_set(ws, "H23", ")")
+    # Restore checkboxes and closing parentheses in the moved measurement section.
+    safe_set(ws, "C19", "☐")
+    safe_set(ws, "C20", "☐")
+    safe_set(ws, "H19", ")")
+    safe_set(ws, "H20", ")")
+    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
         for col in ["B", "C", "D", "F", "H", "I", "J", "M"]:
@@ -2087,10 +2226,13 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     for merged in ["G6:H6", "G7:H7", "G8:H8", "G9:H9"]:
         unmerge_range_keep_style(ws, merged)
 
+    rebuild_bottom_section_layout(ws)
     clear_exact_idr_values(ws)
 
     report_date = format_report_date(idr_info.get("date"))
     safe_set(ws, "C6", report_date)
+    safe_set(ws, "A30", f"Printed {report_date}")
+    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
 
     # Header/manual fields.
     safe_set(ws, "D8", idr_info.get("contractor", ""))
@@ -2115,13 +2257,13 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     measurement_type = clean_line(idr_info.get("measurement_type", ""))
     if measurement_type == "Estimated progress measurement":
-        safe_set(ws, "C21", "☒")
-        safe_set(ws, "H21", (clean_line(idr_info.get("estimated_item_no", "")) + ")") if clean_line(idr_info.get("estimated_item_no", "")) else ")")
+        safe_set(ws, "C19", "☒")
+        safe_set(ws, "H19", (clean_line(idr_info.get("estimated_item_no", "")) + ")") if clean_line(idr_info.get("estimated_item_no", "")) else ")")
     elif measurement_type == "Final field measurement":
-        safe_set(ws, "C23", "☒")
-        safe_set(ws, "H23", (clean_line(idr_info.get("final_item_no", "")) + ")") if clean_line(idr_info.get("final_item_no", "")) else ")")
+        safe_set(ws, "C20", "☒")
+        safe_set(ws, "H20", (clean_line(idr_info.get("final_item_no", "")) + ")") if clean_line(idr_info.get("final_item_no", "")) else ")")
 
-    safe_set(ws, "C25", idr_info.get("remarks", ""))
+    safe_set(ws, "C21", idr_info.get("remarks", ""))
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
