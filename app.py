@@ -28,13 +28,11 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_template.xlsm"
-TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_template.xlsx"
-
-if TEMPLATE_XLSM_PATH.exists():
-    TEMPLATE_PATH = TEMPLATE_XLSM_PATH
-else:
-    TEMPLATE_PATH = TEMPLATE_XLSX_PATH
+TEMPLATE_CANDIDATES = [
+    BASE_DIR / "IDR_Template.xlsx",
+    BASE_DIR / "IDR_template.xlsx",
+]
+TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
 
 BASE_URL = "https://webapps1.dot.illinois.gov"
 IDOT_HOME_URL = "https://webapps1.dot.illinois.gov/WCTB/LBHome"
@@ -49,8 +47,7 @@ SEARCH_MAX_PAGES_PER_LETTING = 25
 CELL_MAP = {
     "date": "C6",
     "contractor_label": "B8",
-    "contractor": "C8",
-    "work_description": "C9",
+    "contractor": "D8",
     "weather": "C10",
     "remarks": "C25",
 
@@ -1456,25 +1453,19 @@ def fetch_idot_job(job_number):
 
     return metadata, pay_items, match
 
+
 # ============================================================
-# PDF HELPERS - NO EXCEL / NO MACROS
+# EXACT EXCEL-STYLE PDF HELPERS
 # ============================================================
 
+import shutil
+import subprocess
+import tempfile
 from datetime import date as DateClass
 
-try:
-    from reportlab.lib.pagesizes import letter, landscape
-    from reportlab.lib import colors
-    from reportlab.lib.units import inch
-    from reportlab.pdfgen import canvas
-except Exception:
-    letter = None
-    landscape = None
-    colors = None
-    inch = 72
-    canvas = None
+PDF_ROW_COUNT = 6
 
-PDF_WEATHER_OPTIONS = [
+WEATHER_OPTIONS = [
     "Sunny",
     "Cloudy",
     "Light Rain",
@@ -1483,8 +1474,6 @@ PDF_WEATHER_OPTIONS = [
     "Snow",
 ]
 
-PDF_ROW_COUNT = 6
-
 
 def get_today_default():
     return DateClass.today()
@@ -1492,20 +1481,26 @@ def get_today_default():
 
 def format_report_date(value):
     if hasattr(value, "strftime"):
-        return value.strftime("%m/%d/%Y")
+        return value.strftime("%-m/%-d/%Y") if hasattr(value, "strftime") else str(value)
     return clean_line(value)
 
 
-def format_report_day(value):
+def format_report_date_safe(value):
     if hasattr(value, "strftime"):
-        return value.strftime("%A")
-    return ""
+        return value.strftime("%m/%d/%Y")
+    return clean_line(value)
 
 
 def format_pdf_filename(contract_number):
     contract_number = clean_line(contract_number) or "IDOT"
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", contract_number).strip("_")
     return f"{safe}_IDR.pdf"
+
+
+def format_xlsx_filename(contract_number):
+    contract_number = clean_line(contract_number) or "IDOT"
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", contract_number).strip("_")
+    return f"{safe}_IDR_filled.xlsx"
 
 
 def dataframe_records_by_code(pay_items):
@@ -1545,55 +1540,14 @@ def dataframe_records_by_description(pay_items):
     return records
 
 
-def resolve_line_item(pay_items, lookup_mode, selected_code, selected_description, custom_code, custom_description, custom_unit, location, quantity):
-    by_code = dataframe_records_by_code(pay_items)
-    by_desc = dataframe_records_by_description(pay_items)
-
-    if lookup_mode == "Custom Item":
-        return {
-            "item_code": normalize_pay_item_code(custom_code),
-            "item_description": clean_line(custom_description),
-            "unit": normalize_unit(custom_unit),
-            "location": clean_line(location),
-            "quantity": clean_line(quantity),
-            "plan_quantity": "",
-            "unit_price": "",
-            "is_custom": True,
-        }
-
-    if lookup_mode == "Item Code":
-        item = by_code.get(normalize_pay_item_code(selected_code), {}).copy()
-    else:
-        item = by_desc.get(clean_line(selected_description), {}).copy()
-
-    if not item:
-        item = {
-            "item_code": normalize_pay_item_code(selected_code),
-            "item_description": clean_line(selected_description),
-            "unit": "",
-            "plan_quantity": "",
-            "unit_price": "",
-            "is_custom": False,
-        }
-
-    item["location"] = clean_line(location)
-    item["quantity"] = clean_line(quantity)
-    item["unit"] = normalize_unit(item.get("unit", ""))
-    return item
-
-
 def parse_number(value):
-    """Convert user/IDOT quantity text into a float. Returns None when it cannot be read."""
     value = clean_line(value)
     if not value:
         return None
-
     value = value.replace(",", "").replace("$", "")
     value = re.sub(r"[^0-9.\-]", "", value)
-
     if not value or value in [".", "-", "-."]:
         return None
-
     try:
         return float(value)
     except Exception:
@@ -1601,59 +1555,30 @@ def parse_number(value):
 
 
 def get_quantity_status(quantity, plan_quantity):
-    """
-    Website-only quantity status.
-    Red: entered quantity is over the permitted/plan quantity.
-    Yellow: entered quantity is at least 75% of permitted/plan quantity.
-    Green: entered quantity is below 75% of permitted/plan quantity.
-    """
     entered = parse_number(quantity)
     permitted = parse_number(plan_quantity)
-
     if entered is None or permitted is None or permitted <= 0:
-        return {
-            "status": "",
-            "ratio": None,
-            "color": "",
-        }
-
+        return {"status": "", "ratio": None, "color": ""}
     ratio = entered / permitted
-
     if entered > permitted:
-        status = f"OVER ({ratio:.0%})"
-        color = "#ffc7ce"
-    elif ratio >= 0.75:
-        status = f"Close ({ratio:.0%})"
-        color = "#ffeb9c"
-    else:
-        status = f"OK ({ratio:.0%})"
-        color = "#c6efce"
-
-    return {
-        "status": status,
-        "ratio": ratio,
-        "color": color,
-    }
-
+        return {"status": f"OVER ({ratio:.0%})", "ratio": ratio, "color": "#ffc7ce"}
+    if ratio >= 0.75:
+        return {"status": f"Close ({ratio:.0%})", "ratio": ratio, "color": "#ffeb9c"}
+    return {"status": f"OK ({ratio:.0%})", "ratio": ratio, "color": "#c6efce"}
 
 
 def get_pay_item_options(pay_items):
-    """Return dropdown options for item codes and descriptions."""
     if pay_items is None or pay_items.empty:
         return [""], [""]
-
     codes = [""]
     descriptions = [""]
-
     for _, row in pay_items.iterrows():
         code = normalize_pay_item_code(row.get("item_code", ""))
         desc = clean_line(row.get("item_description", ""))
-
         if code and code not in codes:
             codes.append(code)
         if desc and desc not in descriptions:
             descriptions.append(desc)
-
     codes.append("Custom / Manual")
     descriptions.append("Custom / Manual")
     return codes, descriptions
@@ -1671,20 +1596,16 @@ def row_key(row_index, field):
     return f"idr_row_{row_index}_{field}"
 
 
+def header_key(field):
+    return f"idr_header_{field}"
+
+
 def clear_idr_row_state():
-    """Reset the six IDR table rows when a new job is loaded."""
     for row_index in range(PDF_ROW_COUNT):
         for field in [
-            "item_code",
-            "item_description",
-            "custom_code",
-            "custom_description",
-            "location",
-            "quantity",
-            "unit",
-            "plan_quantity",
-            "unit_price",
-            "is_custom",
+            "item_code", "item_description", "custom_code", "custom_description",
+            "location", "quantity", "unit", "custom_unit", "plan_quantity",
+            "unit_price", "is_custom",
         ]:
             st.session_state.pop(row_key(row_index, field), None)
 
@@ -1698,11 +1619,11 @@ def ensure_row_defaults(row_index):
         "location": "",
         "quantity": "",
         "unit": "",
+        "custom_unit": "",
         "plan_quantity": "",
         "unit_price": "",
         "is_custom": False,
     }
-
     for field, value in defaults.items():
         st.session_state.setdefault(row_key(row_index, field), value)
 
@@ -1716,25 +1637,14 @@ def set_row_from_official_item(row_index, item):
     st.session_state[row_key(row_index, "is_custom")] = False
 
 
-def set_row_as_custom(row_index):
-    st.session_state[row_key(row_index, "item_code")] = "Custom / Manual"
-    st.session_state[row_key(row_index, "item_description")] = "Custom / Manual"
-    st.session_state[row_key(row_index, "unit")] = normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), ""))
-    st.session_state[row_key(row_index, "plan_quantity")] = ""
-    st.session_state[row_key(row_index, "unit_price")] = ""
-    st.session_state[row_key(row_index, "is_custom")] = True
-
-
 def on_item_code_change(row_index, pay_items):
     code = st.session_state.get(row_key(row_index, "item_code"), "")
-
     if code == "Custom / Manual":
         st.session_state[row_key(row_index, "item_description")] = "Custom / Manual"
         st.session_state[row_key(row_index, "is_custom")] = True
         st.session_state[row_key(row_index, "plan_quantity")] = ""
         st.session_state[row_key(row_index, "unit_price")] = ""
         return
-
     if not code:
         st.session_state[row_key(row_index, "item_description")] = ""
         st.session_state[row_key(row_index, "unit")] = ""
@@ -1742,7 +1652,6 @@ def on_item_code_change(row_index, pay_items):
         st.session_state[row_key(row_index, "unit_price")] = ""
         st.session_state[row_key(row_index, "is_custom")] = False
         return
-
     item = get_pay_item_by_code(pay_items, code)
     if item:
         set_row_from_official_item(row_index, item)
@@ -1750,14 +1659,12 @@ def on_item_code_change(row_index, pay_items):
 
 def on_item_description_change(row_index, pay_items):
     description = st.session_state.get(row_key(row_index, "item_description"), "")
-
     if description == "Custom / Manual":
         st.session_state[row_key(row_index, "item_code")] = "Custom / Manual"
         st.session_state[row_key(row_index, "is_custom")] = True
         st.session_state[row_key(row_index, "plan_quantity")] = ""
         st.session_state[row_key(row_index, "unit_price")] = ""
         return
-
     if not description:
         st.session_state[row_key(row_index, "item_code")] = ""
         st.session_state[row_key(row_index, "unit")] = ""
@@ -1765,7 +1672,6 @@ def on_item_description_change(row_index, pay_items):
         st.session_state[row_key(row_index, "unit_price")] = ""
         st.session_state[row_key(row_index, "is_custom")] = False
         return
-
     item = get_pay_item_by_description(pay_items, description)
     if item:
         set_row_from_official_item(row_index, item)
@@ -1778,9 +1684,8 @@ def on_custom_row_change(row_index):
         )
 
 
-def get_row_for_pdf(row_index):
+def get_row_for_output(row_index):
     is_custom = bool(st.session_state.get(row_key(row_index, "is_custom"), False))
-
     if is_custom:
         return {
             "item_code": normalize_pay_item_code(st.session_state.get(row_key(row_index, "custom_code"), "")),
@@ -1792,7 +1697,6 @@ def get_row_for_pdf(row_index):
             "unit_price": "",
             "is_custom": True,
         }
-
     return {
         "item_code": clean_line(st.session_state.get(row_key(row_index, "item_code"), "")),
         "item_description": clean_line(st.session_state.get(row_key(row_index, "item_description"), "")),
@@ -1808,17 +1712,64 @@ def get_row_for_pdf(row_index):
 def quantity_status_badge_html(quantity, plan_quantity):
     status = get_quantity_status(quantity, plan_quantity)
     if not status["status"]:
-        return "<div class='qty-badge qty-empty'>—</div>"
+        return "<div class='qty-badge qty-empty'>-</div>"
+    return f"<div class='qty-badge' style='background:{status['color']};'>{status['status']}</div>"
 
-    color = status["color"]
-    return f"<div class='qty-badge' style='background:{color};'>{status['status']}</div>"
+
+def build_idr_header_form():
+    st.subheader("IDR Header")
+    st.caption("These fields map to the same lines on the Excel IDR form.")
+
+    row1 = st.columns([1.0, 2.0, 1.4, 1.1, 1.1, 1.1, 1.1])
+    with row1[0]:
+        idr_date = st.date_input("Date", value=get_today_default(), key=header_key("date"))
+    with row1[1]:
+        contractor = st.text_input("Contractor or Sub.", key=header_key("contractor"))
+    with row1[2]:
+        weather = st.selectbox("Weather", [""] + WEATHER_OPTIONS, key=header_key("weather"))
+    with row1[3]:
+        inspected_by = st.text_input("Inspected by", key=header_key("inspected_by"))
+    with row1[4]:
+        measured_by = st.text_input("Measured by", key=header_key("measured_by"))
+    with row1[5]:
+        calculated_by = st.text_input("Calculated by", key=header_key("calculated_by"))
+    with row1[6]:
+        checked_by = st.text_input("Checked by", key=header_key("checked_by"))
+
+    row2 = st.columns([1.0, 1.2, 1.2, 4.0])
+    with row2[0]:
+        measurement_type = st.selectbox(
+            "This is",
+            ["", "Estimated progress measurement", "Final field measurement"],
+            key=header_key("measurement_type"),
+        )
+    with row2[1]:
+        estimated_item_no = st.text_input("Estimated item no.", key=header_key("estimated_item_no"))
+    with row2[2]:
+        final_item_no = st.text_input("Final item no.", key=header_key("final_item_no"))
+    with row2[3]:
+        remarks = st.text_area("Remarks", height=70, key=header_key("remarks"))
+
+    return {
+        "date": idr_date,
+        "contractor": contractor,
+        "weather": weather,
+        "inspected_by": inspected_by,
+        "measured_by": measured_by,
+        "calculated_by": calculated_by,
+        "checked_by": checked_by,
+        "measurement_type": measurement_type,
+        "estimated_item_no": estimated_item_no,
+        "final_item_no": final_item_no,
+        "remarks": remarks,
+    }
 
 
 def build_idr_rows_form(pay_items):
-    st.subheader("IDR Pay Item Rows")
+    st.subheader("IDR Pay Item Table")
     st.caption(
-        "Use the table like the Excel form. The Item Code and Item Description columns are searchable dropdowns. "
-        "Selecting either one fills the other one and the unit automatically. Choose Custom / Manual for non-IDOT items."
+        "Use this like the Excel table. Item Code and Item Description are searchable dropdowns. "
+        "Selecting either one fills the other and the unit. Quantity color is website-only and will not print on the PDF."
     )
 
     code_options, description_options = get_pay_item_options(pay_items)
@@ -1826,57 +1777,27 @@ def build_idr_rows_form(pay_items):
     st.markdown(
         """
         <style>
-        .idr-table-header {
-            font-weight: 700;
-            font-size: 0.82rem;
-            padding: 0.25rem 0;
-            border-bottom: 1px solid #d0d0d0;
-        }
-        .idr-row-box {
-            border-bottom: 1px solid #eeeeee;
-            padding: 0.15rem 0 0.35rem 0;
-        }
-        .qty-badge {
-            min-height: 36px;
-            border: 1px solid #999999;
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            font-size: 0.78rem;
-            color: #111111;
-            margin-top: 1.70rem;
-        }
-        .qty-empty {
-            background: #f4f4f4;
-            color: #777777;
-            font-weight: 400;
-        }
-        div[data-testid="stSelectbox"] label,
-        div[data-testid="stTextInput"] label {
-            display: none;
-        }
+        .idr-table-header {font-weight: 700; font-size: 0.82rem; padding: 0.25rem 0; border-bottom: 1px solid #d0d0d0;}
+        .qty-badge {min-height: 36px; border: 1px solid #999; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.78rem; color: #111; margin-top: 1.70rem;}
+        .qty-empty {background: #f4f4f4; color: #777; font-weight: 400;}
+        div[data-testid="stSelectbox"] label, div[data-testid="stTextInput"] label {display: none;}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    header_cols = st.columns([1.15, 3.45, 1.65, 1.0, 0.85, 0.95])
-    headers = ["Item Code", "Item Description", "Location", "Quantity", "Unit", "Status"]
+    header_cols = st.columns([1.1, 0.7, 3.1, 2.2, 1.05, 0.9, 0.95])
+    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Status"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
     rows = []
-
     for row_index in range(PDF_ROW_COUNT):
         ensure_row_defaults(row_index)
-
-        row_cols = st.columns([1.15, 3.45, 1.65, 1.0, 0.85, 0.95])
+        row_cols = st.columns([1.1, 0.7, 3.1, 2.2, 1.05, 0.9, 0.95])
 
         current_code = st.session_state.get(row_key(row_index, "item_code"), "")
         current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
-
         if current_code not in code_options:
             st.session_state[row_key(row_index, "item_code")] = ""
         if current_desc not in description_options:
@@ -1891,8 +1812,9 @@ def build_idr_rows_form(pay_items):
                 args=(row_index, pay_items),
                 label_visibility="collapsed",
             )
-
         with row_cols[1]:
+            st.text_input(f"Row {row_index + 1} Fund", key=row_key(row_index, "fund_code"), label_visibility="collapsed")
+        with row_cols[2]:
             st.selectbox(
                 f"Row {row_index + 1} Item Description",
                 description_options,
@@ -1903,43 +1825,27 @@ def build_idr_rows_form(pay_items):
             )
 
         is_custom = bool(st.session_state.get(row_key(row_index, "is_custom"), False))
-
         if is_custom:
-            # Keep custom entry inside the same table row. It only appears after selecting Custom / Manual.
             with row_cols[0]:
                 st.text_input(
                     f"Row {row_index + 1} Custom Code",
                     key=row_key(row_index, "custom_code"),
                     placeholder="Custom ID",
                     label_visibility="collapsed",
-                    on_change=on_custom_row_change,
-                    args=(row_index,),
                 )
-            with row_cols[1]:
+            with row_cols[2]:
                 st.text_input(
                     f"Row {row_index + 1} Custom Description",
                     key=row_key(row_index, "custom_description"),
                     placeholder="Custom item description",
                     label_visibility="collapsed",
-                    on_change=on_custom_row_change,
-                    args=(row_index,),
                 )
 
-        with row_cols[2]:
-            st.text_input(
-                f"Row {row_index + 1} Location",
-                key=row_key(row_index, "location"),
-                label_visibility="collapsed",
-            )
-
         with row_cols[3]:
-            st.text_input(
-                f"Row {row_index + 1} Quantity",
-                key=row_key(row_index, "quantity"),
-                label_visibility="collapsed",
-            )
-
+            st.text_input(f"Row {row_index + 1} Location", key=row_key(row_index, "location"), label_visibility="collapsed")
         with row_cols[4]:
+            st.text_input(f"Row {row_index + 1} Quantity", key=row_key(row_index, "quantity"), label_visibility="collapsed")
+        with row_cols[5]:
             if is_custom:
                 st.text_input(
                     f"Row {row_index + 1} Unit",
@@ -1950,287 +1856,301 @@ def build_idr_rows_form(pay_items):
                     args=(row_index,),
                 )
             else:
-                st.text_input(
-                    f"Row {row_index + 1} Unit",
-                    key=row_key(row_index, "unit"),
-                    label_visibility="collapsed",
-                    disabled=True,
-                )
+                st.text_input(f"Row {row_index + 1} Unit", key=row_key(row_index, "unit"), label_visibility="collapsed", disabled=True)
 
-        row = get_row_for_pdf(row_index)
+        row = get_row_for_output(row_index)
+        row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
         rows.append(row)
-
-        with row_cols[5]:
-            st.markdown(
-                quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")),
-                unsafe_allow_html=True,
-            )
+        with row_cols[6]:
+            st.markdown(quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")), unsafe_allow_html=True)
 
     return rows
 
-def wrap_text_to_lines(text, max_chars, max_lines):
-    text = clean_line(text)
-    if not text:
-        return [""]
 
-    words = text.split()
-    lines = []
-    current = ""
 
-    for word in words:
-        test = word if not current else current + " " + word
-        if len(test) <= max_chars:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
 
-        if len(lines) >= max_lines:
+def safe_set(ws, cell, value):
+    """Write to a cell safely, including merged cells."""
+    for merged_range in ws.merged_cells.ranges:
+        if cell in merged_range:
+            top_left_cell = merged_range.coord.split(":")[0]
+            ws[top_left_cell] = value
+            return
+    ws[cell] = value
+
+
+def get_merged_anchor_cell(ws, cell_address):
+    for merged_range in ws.merged_cells.ranges:
+        if cell_address in merged_range:
+            return merged_range.coord.split(":")[0]
+    return cell_address
+
+
+def get_description_font_size(description):
+    description_length = len(clean_line(description))
+    for max_length, font_size in DESCRIPTION_TEXT_FIT_RULES:
+        if description_length <= max_length:
+            return font_size
+    return 6
+
+
+def make_font_with_size(original_font, size):
+    return Font(
+        name=original_font.name,
+        sz=size,
+        b=original_font.b,
+        i=original_font.i,
+        vertAlign=original_font.vertAlign,
+        underline=original_font.underline,
+        strike=original_font.strike,
+        color=copy(original_font.color),
+        scheme=original_font.scheme,
+        family=original_font.family,
+        charset=original_font.charset,
+        outline=original_font.outline,
+        shadow=original_font.shadow,
+        condense=original_font.condense,
+        extend=original_font.extend,
+    )
+
+
+def get_text_for_cell(ws, cell_address):
+    anchor_address = get_merged_anchor_cell(ws, cell_address)
+    value = ws[anchor_address].value
+    return "" if value is None else str(value)
+
+
+def format_item_description_cells(ws):
+    for row in range(13, 19):
+        visible_cell_address = f"D{row}"
+        anchor_cell_address = get_merged_anchor_cell(ws, visible_cell_address)
+        anchor_cell = ws[anchor_cell_address]
+        description_text = get_text_for_cell(ws, visible_cell_address)
+        font_size = get_description_font_size(description_text)
+        current_alignment = copy(anchor_cell.alignment)
+        anchor_cell.alignment = Alignment(
+            horizontal=current_alignment.horizontal or "left",
+            vertical="top",
+            text_rotation=current_alignment.text_rotation,
+            wrap_text=True,
+            shrink_to_fit=False,
+            indent=current_alignment.indent,
+            relativeIndent=current_alignment.relativeIndent,
+            justifyLastLine=current_alignment.justifyLastLine,
+            readingOrder=current_alignment.readingOrder,
+        )
+        anchor_cell.font = make_font_with_size(anchor_cell.font, font_size)
+
+def unmerge_range_keep_style(ws, range_coord):
+    target = None
+    for merged_range in list(ws.merged_cells.ranges):
+        if str(merged_range) == range_coord:
+            target = merged_range
             break
+    if target is None:
+        return
+    anchor = ws.cell(target.min_row, target.min_col)
+    saved = {
+        "font": copy(anchor.font),
+        "fill": copy(anchor.fill),
+        "border": copy(anchor.border),
+        "alignment": copy(anchor.alignment),
+        "number_format": anchor.number_format,
+        "protection": copy(anchor.protection),
+    }
+    ws.unmerge_cells(range_coord)
+    for row in range(target.min_row, target.max_row + 1):
+        for col in range(target.min_col, target.max_col + 1):
+            cell = ws.cell(row, col)
+            cell.font = copy(saved["font"])
+            cell.fill = copy(saved["fill"])
+            cell.border = copy(saved["border"])
+            cell.alignment = copy(saved["alignment"])
+            cell.number_format = saved["number_format"]
+            cell.protection = copy(saved["protection"])
 
-    if current and len(lines) < max_lines:
-        lines.append(current)
 
-    if len(lines) == max_lines and len(" ".join(words)) > len(" ".join(lines)):
-        lines[-1] = lines[-1][:max(0, max_chars - 3)].rstrip() + "..."
+def prepare_exact_print_layout(wb, ws):
+    wb.active = wb.sheetnames.index(ws.title)
+    for sheet in wb.worksheets:
+        if sheet.title != ws.title:
+            sheet.sheet_state = "hidden"
 
-    return lines or [""]
+    ws.print_area = "B2:N30"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.25
+    ws.page_margins.bottom = 0.25
+    ws.page_margins.header = 0
+    ws.page_margins.footer = 0
 
 
-def draw_label_value(c, label, value, x, y, width, height=18, field_name=None, editable=True, font_size=8):
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(x, y + height + 3, label)
-    c.rect(x, y, width, height, stroke=1, fill=0)
+def clear_exact_idr_values(ws):
+    # Header values only - do not clear labels.
+    for cell in ["C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "C25", "H21", "H23"]:
+        safe_set(ws, cell, "")
 
-    value = clean_line(value)
-    if editable and field_name:
-        c.acroForm.textfield(
-            name=field_name,
-            value=value,
-            x=x + 2,
-            y=y + 2,
-            width=width - 4,
-            height=height - 4,
-            borderWidth=0,
-            fontName="Helvetica",
-            fontSize=font_size,
-            textColor=colors.black,
-            fillColor=None,
-            forceBorder=False,
+    # Restore checkboxes and closing parentheses.
+    safe_set(ws, "C21", "☐")
+    safe_set(ws, "C23", "☐")
+    safe_set(ws, "H21", ")")
+    safe_set(ws, "H23", ")")
+
+    for row in range(13, 19):
+        for col in ["B", "C", "D", "F", "H", "I", "J", "M"]:
+            safe_set(ws, f"{col}{row}", "")
+
+
+def fill_exact_idr_workbook(metadata, idr_info, rows):
+    if not TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            f"Template file not found. Put IDR_Template.xlsx in the same folder as this app file. Expected: {TEMPLATE_PATH}"
         )
-    else:
-        c.setFont("Helvetica", font_size)
-        c.drawString(x + 2, y + 5, value[:80])
 
+    wb = load_workbook(TEMPLATE_PATH)
+    ws = wb["IDR_Form"] if "IDR_Form" in wb.sheetnames else wb.active
 
-def draw_multiline_field(c, name, value, x, y, width, height, font_size=7):
-    c.rect(x, y, width, height, stroke=1, fill=0)
-    value = clean_line(value)
+    # Split the initial/date line cells so the right-side dates can be filled cleanly.
+    for merged in ["G6:H6", "G7:H7", "G8:H8", "G9:H9"]:
+        unmerge_range_keep_style(ws, merged)
 
-    # ReportLab textfield supports basic AcroForm fields. Many PDF viewers allow editing these fields.
+    clear_exact_idr_values(ws)
+
+    report_date = format_report_date(idr_info.get("date"))
+    safe_set(ws, "C6", report_date)
+
+    # Header/manual fields.
+    safe_set(ws, "D8", idr_info.get("contractor", ""))
+    safe_set(ws, "C10", idr_info.get("weather", ""))
+    safe_set(ws, "G6", idr_info.get("inspected_by", ""))
+    safe_set(ws, "H6", report_date)
+    safe_set(ws, "G7", idr_info.get("measured_by", ""))
+    safe_set(ws, "H7", report_date)
+    safe_set(ws, "G8", idr_info.get("calculated_by", ""))
+    safe_set(ws, "H8", report_date)
+    safe_set(ws, "G9", idr_info.get("checked_by", ""))
+    safe_set(ws, "H9", report_date)
+
+    # Job metadata from IDOT.
+    safe_set(ws, "L2", metadata.get("county", ""))
+    safe_set(ws, "L3", metadata.get("key_route", ""))
+    safe_set(ws, "L4", metadata.get("marked_route", ""))
+    safe_set(ws, "L5", metadata.get("district", ""))
+    safe_set(ws, "L6", metadata.get("item_contract", ""))
+    safe_set(ws, "L7", metadata.get("state_job", ""))
+    safe_set(ws, "L8", metadata.get("federal_project", ""))
+
+    measurement_type = clean_line(idr_info.get("measurement_type", ""))
+    if measurement_type == "Estimated progress measurement":
+        safe_set(ws, "C21", "☒")
+        safe_set(ws, "H21", (clean_line(idr_info.get("estimated_item_no", "")) + ")") if clean_line(idr_info.get("estimated_item_no", "")) else ")")
+    elif measurement_type == "Final field measurement":
+        safe_set(ws, "C23", "☒")
+        safe_set(ws, "H23", (clean_line(idr_info.get("final_item_no", "")) + ")") if clean_line(idr_info.get("final_item_no", "")) else ")")
+
+    safe_set(ws, "C25", idr_info.get("remarks", ""))
+
+    for i in range(PDF_ROW_COUNT):
+        excel_row = 13 + i
+        row = rows[i] if i < len(rows) else {}
+        code = clean_line(row.get("item_code", ""))
+        if code == "Custom / Manual":
+            code = ""
+        desc = clean_line(row.get("item_description", ""))
+        if desc == "Custom / Manual":
+            desc = ""
+        qty = clean_line(row.get("quantity", ""))
+        unit = normalize_unit(row.get("unit", ""))
+        qty_unit = clean_line(f"{qty} {unit}") if qty or unit else ""
+
+        safe_set(ws, f"B{excel_row}", code)
+        safe_set(ws, f"C{excel_row}", clean_line(row.get("fund_code", "")))
+        safe_set(ws, f"D{excel_row}", desc)
+        safe_set(ws, f"F{excel_row}", clean_line(row.get("location", "")))
+        safe_set(ws, f"H{excel_row}", qty_unit)
+
     try:
-        c.acroForm.textfield(
-            name=name,
-            value=value,
-            x=x + 2,
-            y=y + 2,
-            width=width - 4,
-            height=height - 4,
-            borderWidth=0,
-            fontName="Helvetica",
-            fontSize=font_size,
-            textColor=colors.black,
-            fillColor=None,
-            forceBorder=False,
-            fieldFlags="multiline",
-        )
-    except TypeError:
-        # Older reportlab versions may not accept fieldFlags as a string.
-        c.setFont("Helvetica", font_size)
-        lines = wrap_text_to_lines(value, 55, 4)
-        text_y = y + height - 10
-        for line in lines:
-            c.drawString(x + 2, text_y, line)
-            text_y -= font_size + 2
+        format_item_description_cells(ws)
+    except Exception:
+        pass
 
-
-def make_fillable_idr_pdf(metadata, idr_info, rows):
-    if canvas is None:
-        raise RuntimeError("The reportlab package is required. Add reportlab to requirements.txt.")
+    prepare_exact_print_layout(wb, ws)
 
     output = io.BytesIO()
-    c = canvas.Canvas(output, pagesize=landscape(letter))
-    page_width, page_height = landscape(letter)
-
-    margin = 28
-    top = page_height - margin
-
-    report_date = idr_info.get("date", get_today_default())
-    report_date_text = format_report_date(report_date)
-    report_day_text = format_report_day(report_date)
-
-    # Title
-    c.setFont("Helvetica-Bold", 15)
-    c.drawCentredString(page_width / 2, top - 5, "IDOT INSPECTOR DAILY REPORT")
-    c.setFont("Helvetica", 8)
-    c.drawCentredString(page_width / 2, top - 18, "Generated from the Streamlit IDR website - macro-free PDF")
-
-    # Header date blocks. Top-left and top-right update from selected date.
-    draw_label_value(c, "Date", report_date_text, margin, top - 42, 90, field_name="top_left_date")
-    draw_label_value(c, "Day", report_day_text, margin + 98, top - 42, 90, field_name="top_left_day")
-    draw_label_value(c, "Report Date", report_date_text, page_width - margin - 190, top - 42, 90, field_name="top_right_date")
-    draw_label_value(c, "Day", report_day_text, page_width - margin - 92, top - 42, 92, field_name="top_right_day")
-
-    # Job info blocks.
-    y = top - 82
-    left_x = margin
-    mid_x = margin + 260
-    right_x = margin + 520
-
-    draw_label_value(c, "Contractor or Sub.", idr_info.get("contractor", ""), left_x, y, 230, field_name="contractor")
-    draw_label_value(c, "Weather", idr_info.get("weather", ""), mid_x, y, 120, field_name="weather")
-    draw_label_value(c, "Contract No.", metadata.get("item_contract", ""), right_x, y, 110, field_name="contract_no")
-    draw_label_value(c, "Job No.", metadata.get("state_job", ""), right_x + 118, y, 110, field_name="job_no")
-
-    y -= 40
-    draw_label_value(c, "County", metadata.get("county", ""), left_x, y, 150, field_name="county")
-    draw_label_value(c, "Section", metadata.get("key_route", ""), left_x + 160, y, 170, field_name="section")
-    draw_label_value(c, "Route", metadata.get("marked_route", ""), left_x + 340, y, 180, field_name="route")
-    draw_label_value(c, "District", metadata.get("district", ""), left_x + 530, y, 70, field_name="district")
-    draw_label_value(c, "Project", metadata.get("federal_project", ""), left_x + 610, y, 120, field_name="project")
-
-    y -= 47
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(left_x, y + 24, "Work Description")
-    draw_multiline_field(c, "work_description", idr_info.get("work_description", ""), left_x, y - 5, page_width - (2 * margin), 28, font_size=7)
-
-    # Pay item table.
-    table_top = y - 25
-    row_h = 45
-    headers = [
-        ("Item Code", 82),
-        ("Item Description", 255),
-        ("Location", 150),
-        ("Quantity", 70),
-        ("Unit", 62),
-        ("Custom?", 54),
-    ]
-
-    x = margin
-    c.setFillColor(colors.lightgrey)
-    c.rect(x, table_top - 17, sum(w for _, w in headers), 17, stroke=1, fill=1)
-    c.setFillColor(colors.black)
-    c.setFont("Helvetica-Bold", 7)
-    cx = x
-    for label, w in headers:
-        c.drawString(cx + 3, table_top - 12, label)
-        c.rect(cx, table_top - 17, w, 17, stroke=1, fill=0)
-        cx += w
-
-    start_y = table_top - 17
-    for i in range(PDF_ROW_COUNT):
-        row = rows[i] if i < len(rows) else {}
-        row_y = start_y - ((i + 1) * row_h)
-        cx = x
-
-        code = clean_line(row.get("item_code", ""))
-        desc = clean_line(row.get("item_description", ""))
-        loc = clean_line(row.get("location", ""))
-        qty = clean_line(row.get("quantity", ""))
-        unit = clean_line(row.get("unit", ""))
-        custom = "Yes" if row.get("is_custom") else ""
-
-        values = [code, desc, loc, qty, unit, custom]
-        field_names = [
-            f"row_{i+1}_item_code",
-            f"row_{i+1}_item_description",
-            f"row_{i+1}_location",
-            f"row_{i+1}_quantity",
-            f"row_{i+1}_unit",
-            f"row_{i+1}_custom",
-        ]
-
-        for (label, w), value, field_name in zip(headers, values, field_names):
-            c.rect(cx, row_y, w, row_h, stroke=1, fill=0)
-            if label == "Item Description":
-                draw_multiline_field(c, field_name, value, cx, row_y, w, row_h, font_size=6)
-            else:
-                try:
-                    c.acroForm.textfield(
-                        name=field_name,
-                        value=value,
-                        x=cx + 2,
-                        y=row_y + 14,
-                        width=w - 4,
-                        height=14,
-                        borderWidth=0,
-                        fontName="Helvetica",
-                        fontSize=7,
-                        textColor=colors.black,
-                        fillColor=None,
-                        forceBorder=False,
-                    )
-                except Exception:
-                    c.setFont("Helvetica", 7)
-                    c.drawString(cx + 3, row_y + row_h - 12, value[:20])
-            cx += w
-
-    # Remarks area.
-    remarks_y = margin + 34
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(margin, remarks_y + 42, "Remarks / Notes")
-    draw_multiline_field(c, "remarks", idr_info.get("remarks", ""), margin, remarks_y, page_width - (2 * margin), 40, font_size=7)
-
-    # Signature fields.
-    sig_y = margin
-    draw_label_value(c, "Inspector Name", idr_info.get("inspector", ""), margin, sig_y, 200, field_name="inspector")
-    draw_label_value(c, "Signature", "", margin + 220, sig_y, 220, field_name="signature")
-    draw_label_value(c, "Date", report_date_text, margin + 460, sig_y, 100, field_name="signature_date")
-
-    c.showPage()
-    c.save()
+    wb.save(output)
     output.seek(0)
     return output
 
 
-def make_pay_items_excel(metadata, pay_items):
-    output = io.BytesIO()
+def find_libreoffice_executable():
+    return shutil.which("libreoffice") or shutil.which("soffice")
 
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        pay_items.to_excel(writer, index=False, sheet_name="Pay Items")
 
-        info_df = pd.DataFrame(
-            [{"field": k, "value": v} for k, v in metadata.items()]
+def convert_xlsx_bytes_to_pdf(xlsx_bytes):
+    executable = find_libreoffice_executable()
+    if not executable:
+        raise RuntimeError(
+            "LibreOffice is required for exact Excel-to-PDF output. Add an apt packages file with libreoffice installed."
         )
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        xlsx_path = tmpdir_path / "filled_idr.xlsx"
+        pdf_path = tmpdir_path / "filled_idr.pdf"
+        xlsx_path.write_bytes(xlsx_bytes.getvalue())
+
+        result = subprocess.run(
+            [
+                executable,
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(tmpdir_path),
+                str(xlsx_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=90,
+        )
+
+        if result.returncode != 0 or not pdf_path.exists():
+            raise RuntimeError(
+                "LibreOffice could not convert the filled template to PDF.\n\n"
+                f"stdout: {result.stdout}\n\nstderr: {result.stderr}"
+            )
+
+        return io.BytesIO(pdf_path.read_bytes())
+
+
+def make_exact_idr_pdf(metadata, idr_info, rows):
+    xlsx_output = fill_exact_idr_workbook(metadata, idr_info, rows)
+    return convert_xlsx_bytes_to_pdf(xlsx_output)
+
+
+def make_pay_items_excel(metadata, pay_items):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        pay_items.to_excel(writer, index=False, sheet_name="Pay Items")
+        info_df = pd.DataFrame([{"field": k, "value": v} for k, v in metadata.items()])
         info_df.to_excel(writer, index=False, sheet_name="Job Info")
-
         workbook = writer.book
-
         for sheet_name in writer.sheets:
             ws = writer.sheets[sheet_name]
             ws.freeze_panes(1, 0)
             ws.autofilter(0, 0, 1000, 20)
-
-            header_format = workbook.add_format({
-                "bold": True,
-                "border": 1,
-                "text_wrap": True,
-            })
-
-            if sheet_name == "Pay Items":
-                cols = pay_items.columns
-            else:
-                cols = info_df.columns
-
+            header_format = workbook.add_format({"bold": True, "border": 1, "text_wrap": True})
+            cols = pay_items.columns if sheet_name == "Pay Items" else info_df.columns
             for col_num, col in enumerate(cols):
                 ws.write(0, col_num, col, header_format)
                 ws.set_column(col_num, col_num, 24)
-
             if sheet_name == "Pay Items":
                 ws.set_column(2, 2, 48)
-
     output.seek(0)
     return output
 
@@ -2240,39 +2160,29 @@ def make_pay_items_excel(metadata, pay_items):
 # ============================================================
 
 st.set_page_config(
-    page_title="IDOT Job IDR PDF Generator",
+    page_title="IDOT Job IDR Generator",
     page_icon="📄",
     layout="wide",
 )
 
-st.title("IDOT Job IDR PDF Generator")
-
+st.title("IDOT Job IDR Generator")
 st.write(
     "Enter an IDOT job/contract number or paste the direct IDOT contract URL. "
-    "The app pulls the job information and pay items, then creates a macro-free editable PDF."
+    "The website fills the IDR form and exports a PDF that matches the Excel template layout."
 )
-
-if canvas is None:
-    st.error("Missing dependency: reportlab. Add reportlab to requirements.txt and redeploy the app.")
-    st.stop()
 
 with st.sidebar:
     st.header("Job Lookup")
-
     job_number = st.text_input(
         "IDOT Job / Contract Number or Contract Detail URL",
         placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
     )
-
-    st.caption("No Excel macros are used. The website creates a fillable PDF output.")
-
+    st.caption("The PDF is generated from the Excel .xlsx template on the server. No macros are used.")
 
 if "metadata" not in st.session_state:
     st.session_state.metadata = None
-
 if "pay_items" not in st.session_state:
     st.session_state.pay_items = pd.DataFrame()
-
 if "match" not in st.session_state:
     st.session_state.match = None
 
@@ -2280,24 +2190,15 @@ if st.button("Find IDOT Job"):
     try:
         with st.spinner("Searching IDOT Transportation Bulletin archives newest to oldest..."):
             metadata, pay_items, match = fetch_idot_job(job_number)
-
         st.session_state.metadata = metadata
         st.session_state.pay_items = pay_items
         st.session_state.match = match
         clear_idr_row_state()
-
-        st.success(
-            f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items."
-        )
-
+        st.success(f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items.")
         if match.get("letting_url"):
-            st.info(
-                f"Found on letting/archive page: {match.get('letting', '')}, "
-                f"page {match.get('page', '')}"
-            )
+            st.info(f"Found on letting/archive page: {match.get('letting', '')}, page {match.get('page', '')}")
         else:
             st.info(f"Found using: {match.get('letting', '')}")
-
     except Exception as e:
         st.error(str(e))
 
@@ -2306,7 +2207,6 @@ pay_items = st.session_state.pay_items
 
 if metadata is not None:
     st.subheader("Job Information")
-
     required_fields = {
         "County": metadata.get("county", ""),
         "Section": metadata.get("key_route", ""),
@@ -2316,86 +2216,61 @@ if metadata is not None:
         "Job No.": metadata.get("state_job", ""),
         "Project": metadata.get("federal_project", ""),
     }
-
     missing_fields = [name for name, value in required_fields.items() if not value]
-
     if missing_fields:
-        st.warning(
-            "Some job fields did not parse correctly: "
-            + ", ".join(missing_fields)
-            + ". You can still generate the PDF, then edit those fields inside the PDF if needed."
-        )
-
+        st.warning("Some job fields did not parse correctly: " + ", ".join(missing_fields))
         with st.expander("Parser debug info"):
             st.write(metadata)
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
         st.write(f"**County:** {metadata.get('county', '')}")
         st.write(f"**Section:** {metadata.get('key_route', '')}")
         st.write(f"**Route:** {metadata.get('marked_route', '')}")
-
     with col2:
         st.write(f"**District:** {metadata.get('district', '')}")
         st.write(f"**Contract No.:** {metadata.get('item_contract', '')}")
         st.write(f"**Job No.:** {metadata.get('state_job', '')}")
-
     with col3:
         st.write(f"**Project:** {metadata.get('federal_project', '')}")
         st.write(f"**Working Days:** {metadata.get('working_days', '')}")
 
 if metadata is not None and not pay_items.empty:
-    st.subheader("IDR Header Fields")
-
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        idr_date = st.date_input("IDR Date", value=get_today_default())
-    with c2:
-        contractor = st.text_input("Contractor or Subcontractor")
-    with c3:
-        weather = st.selectbox("Weather", [""] + PDF_WEATHER_OPTIONS)
-
-    work_description = st.text_area("Work Description", height=70)
-    remarks = st.text_area("Remarks / Notes", height=80)
-    inspector = st.text_input("Inspector Name")
-
+    idr_info = build_idr_header_form()
     st.divider()
-
     rows = build_idr_rows_form(pay_items)
-
     st.divider()
 
-    col_a, col_b = st.columns(2)
-
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
         pay_items_file = make_pay_items_excel(metadata, pay_items)
-
         st.download_button(
             label="Download IDOT Pay Item Table",
             data=pay_items_file,
             file_name=f"{metadata.get('item_contract', 'idot_job')}_pay_items.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
     with col_b:
-        idr_info = {
-            "date": idr_date,
-            "contractor": contractor,
-            "weather": weather,
-            "work_description": work_description,
-            "remarks": remarks,
-            "inspector": inspector,
-        }
-
         try:
-            pdf_file = make_fillable_idr_pdf(metadata, idr_info, rows)
+            filled_xlsx = fill_exact_idr_workbook(metadata, idr_info, rows)
             st.download_button(
-                label="Download Editable IDR PDF",
+                label="Download Filled IDR Excel Backup",
+                data=filled_xlsx,
+                file_name=format_xlsx_filename(metadata.get("item_contract", "IDOT")),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.error(f"Could not prepare filled Excel backup: {e}")
+    with col_c:
+        try:
+            pdf_file = make_exact_idr_pdf(metadata, idr_info, rows)
+            st.download_button(
+                label="Download Exact IDR PDF",
                 data=pdf_file,
                 file_name=format_pdf_filename(metadata.get("item_contract", "IDOT")),
                 mime="application/pdf",
             )
         except Exception as e:
-            st.error(f"Could not generate PDF: {e}")
-
+            st.error(f"Could not generate exact PDF: {e}")
+            if not find_libreoffice_executable():
+                st.info("On Streamlit Cloud, add a packages.txt file containing: libreoffice")
