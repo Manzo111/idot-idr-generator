@@ -43,6 +43,8 @@ OLD_MATERIALS_SHEET_NAME = "Materials Data"
 
 
 SEARCH_MAX_PAGES_PER_LETTING = 25
+CACHE_TTL_SECONDS = 86400
+
 
 CELL_MAP = {
     "date": "C6",
@@ -886,6 +888,114 @@ def get_contract_links_from_letting_page(html):
     return contract_links
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def cached_archive_letting_links_newest_first():
+    """
+    Cache the current/archive letting list so the app does not re-download and
+    re-resolve archive dates on every job search.
+    """
+    cached_session = make_session()
+    return get_all_archive_letting_links_newest_first(cached_session)
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def cached_contract_links_for_page(page_url):
+    """
+    Cache one letting result page. This is the biggest repeat-work saver because
+    each letting can have multiple pages, and users often search several jobs
+    from the same letting.
+    """
+    cached_session = make_session()
+    html = get_html(cached_session, page_url)
+    return get_contract_links_from_letting_page(html)
+
+
+def make_contract_result(contract, letting, page_num, source_suffix=""):
+    source = letting.get("source", "")
+    if source_suffix:
+        source = f"{source}-{source_suffix}" if source else source_suffix
+
+    return {
+        "label": contract.get("label", ""),
+        "url": contract.get("url", ""),
+        "letting": letting.get("text", ""),
+        "letting_url": letting.get("url", ""),
+        "page": page_num,
+        "source": source,
+    }
+
+
+def add_contract_to_index(contract_index, label, result):
+    normalized_label = normalize_contract_input(label)
+
+    if not normalized_label:
+        return
+
+    # Index the full contract number, like 001-62K33.
+    contract_index.setdefault(normalized_label, result)
+
+    # Also index the common user input, like 62K33.
+    if "-" in normalized_label:
+        suffix = normalized_label.split("-")[-1]
+        if suffix:
+            contract_index.setdefault(suffix, result)
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Building contract lookup index...")
+def cached_contract_lookup_index():
+    """
+    Build a hash-table style lookup index:
+        contract number/suffix -> contract detail result
+
+    The first run still has to walk IDOT letting pages, but later searches use
+    direct dictionary lookup instead of scanning every page again.
+    """
+    letting_links = cached_archive_letting_links_newest_first()
+    contract_index = {}
+    checked_lettings = 0
+    checked_pages = 0
+
+    for letting in letting_links:
+        checked_lettings += 1
+        seen_page_signatures = set()
+
+        for page_num in range(1, SEARCH_MAX_PAGES_PER_LETTING + 1):
+            page_url = letting["url"] if page_num == 1 else set_query_param(letting["url"], "page", page_num)
+
+            try:
+                contract_links = cached_contract_links_for_page(page_url)
+            except Exception:
+                break
+
+            if not contract_links:
+                break
+
+            page_signature = get_page_signature(contract_links)
+
+            if page_signature in seen_page_signatures:
+                break
+
+            seen_page_signatures.add(page_signature)
+            checked_pages += 1
+
+            for contract in contract_links:
+                label = contract.get("label", "")
+                result = make_contract_result(contract, letting, page_num, source_suffix="cached-index")
+                add_contract_to_index(contract_index, label, result)
+
+    return {
+        "contracts": contract_index,
+        "checked_lettings": checked_lettings,
+        "checked_pages": checked_pages,
+    }
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def cached_public_contract_search(user_job_number):
+    cached_session = make_session()
+    return find_contract_detail_url_from_public_search(cached_session, user_job_number)
+
+
 def letting_page_matches_contract(session, letting, user_job_number):
     seen_page_signatures = set()
 
@@ -896,11 +1006,13 @@ def letting_page_matches_contract(session, letting, user_job_number):
             page_url = set_query_param(letting["url"], "page", page_num)
 
         try:
-            html = get_html(session, page_url)
+            contract_links = cached_contract_links_for_page(page_url)
         except Exception:
-            break
-
-        contract_links = get_contract_links_from_letting_page(html)
+            try:
+                html = get_html(session, page_url)
+                contract_links = get_contract_links_from_letting_page(html)
+            except Exception:
+                break
 
         if not contract_links:
             break
@@ -916,14 +1028,7 @@ def letting_page_matches_contract(session, letting, user_job_number):
             label = contract.get("label", "")
 
             if contract_matches(user_job_number, label):
-                return {
-                    "label": label,
-                    "url": contract["url"],
-                    "letting": letting["text"],
-                    "letting_url": letting["url"],
-                    "page": page_num,
-                    "source": letting.get("source", ""),
-                }
+                return make_contract_result(contract, letting, page_num, source_suffix="cached-page")
 
     return None
 
@@ -1024,8 +1129,39 @@ def find_contract_detail_url(session, job_number):
 
     user_job_number = normalize_contract_input(original_input)
 
-    letting_links = get_all_archive_letting_links_newest_first(session)
+    # Fast path 1: public search can often jump straight to the contract detail URL.
+    # Cache it so repeat searches do not hit Bing/DuckDuckGo again.
+    result = cached_public_contract_search(user_job_number)
+
+    if result is not None:
+        return result
+
+    # Fast path 2: use a prebuilt hash-table index instead of scanning every
+    # current/archive letting page for every single user search.
     checked_lettings = 0
+    checked_pages = 0
+
+    try:
+        lookup_index = cached_contract_lookup_index()
+        checked_lettings = lookup_index.get("checked_lettings", 0)
+        checked_pages = lookup_index.get("checked_pages", 0)
+        result = lookup_index.get("contracts", {}).get(user_job_number)
+
+        if result is not None:
+            return result
+
+    except Exception:
+        # If the cache/index build fails, fall back to the safer page-by-page scan.
+        pass
+
+    # Last fallback: scan letting pages newest-to-oldest. This still uses cached
+    # letting links and cached page parsing where possible.
+    try:
+        letting_links = cached_archive_letting_links_newest_first()
+    except Exception:
+        letting_links = get_all_archive_letting_links_newest_first(session)
+
+    checked_lettings = checked_lettings or 0
 
     for letting in letting_links:
         checked_lettings += 1
@@ -1039,14 +1175,10 @@ def find_contract_detail_url(session, job_number):
         if result is not None:
             return result
 
-    result = find_contract_detail_url_from_public_search(session, user_job_number)
-
-    if result is not None:
-        return result
-
     raise ValueError(
         f"Could not find contract '{user_job_number}'. "
-        f"I checked {checked_lettings} current/archive letting page(s), newest to oldest. "
+        f"I checked {checked_lettings} current/archive letting page(s)"
+        f" and {checked_pages} cached letting page(s), newest to oldest. "
         "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
     )
 
