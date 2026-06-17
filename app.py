@@ -2393,8 +2393,6 @@ with st.sidebar:
         "IDOT Job / Contract Number or Contract Detail URL",
         placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
     )
-    st.caption("The PDF is generated from the Excel .xlsx template on the server. No macros are used.")
-
 if "metadata" not in st.session_state:
     st.session_state.metadata = None
 if "pay_items" not in st.session_state:
