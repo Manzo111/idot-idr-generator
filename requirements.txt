@@ -4,5 +4,4 @@ requests
 beautifulsoup4
 openpyxl
 xlsxwriter
-xlrd
-lxml
+reportlab
