@@ -28,8 +28,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_template.xlsm"
-TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_template.xlsx"
+TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_Template.xlsm"
+TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_Template.xlsx"
 
 if TEMPLATE_XLSM_PATH.exists():
     TEMPLATE_PATH = TEMPLATE_XLSM_PATH
