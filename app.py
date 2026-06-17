@@ -28,11 +28,13 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================
 
 BASE_DIR = Path(__file__).parent
-TEMPLATE_CANDIDATES = [
-    BASE_DIR / "IDR_Template.xlsx",
-    BASE_DIR / "IDR_Template.xlsx",
-]
-TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
+TEMPLATE_XLSM_PATH = BASE_DIR / "IDR_Template.xlsm"
+TEMPLATE_XLSX_PATH = BASE_DIR / "IDR_Template.xlsx"
+
+if TEMPLATE_XLSM_PATH.exists():
+    TEMPLATE_PATH = TEMPLATE_XLSM_PATH
+else:
+    TEMPLATE_PATH = TEMPLATE_XLSX_PATH
 
 BASE_URL = "https://webapps1.dot.illinois.gov"
 IDOT_HOME_URL = "https://webapps1.dot.illinois.gov/WCTB/LBHome"
@@ -1454,675 +1456,459 @@ def fetch_idot_job(job_number):
 
     return metadata, pay_items, match
 
-
 # ============================================================
-# EXCEL HELPERS
+# PDF HELPERS - NO EXCEL / NO MACROS
 # ============================================================
 
-def get_effective_cell_address(ws, cell):
-    """
-    If a cell is part of a merged range, return the top-left cell of that merged range.
-    Otherwise, return the original cell.
+from datetime import date as DateClass
 
-    This is important because writing blank text into any cell inside a merged range
-    actually writes to the top-left cell, which can accidentally erase labels.
-    """
-    for merged_range in ws.merged_cells.ranges:
-        if cell in merged_range:
-            return merged_range.coord.split(":")[0]
+try:
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas
+except Exception:
+    letter = None
+    landscape = None
+    colors = None
+    inch = 72
+    canvas = None
 
-    return cell
+PDF_WEATHER_OPTIONS = [
+    "Sunny",
+    "Cloudy",
+    "Light Rain",
+    "Normal Rain",
+    "Heavy Rain",
+    "Snow",
+]
 
+PDF_ROW_COUNT = 6
 
-def write_contractor_section(ws):
-    """
-    Keeps the Contractor/Subcontractor label on the Excel sheet.
 
-    The bug was caused by this situation:
-    - the template has a merged contractor area,
-    - safe_set(ws, contractor_cell, "") writes to the top-left of that merged area,
-    - that top-left cell is also where the label lives,
-    - so the label gets erased.
+def get_today_default():
+    return DateClass.today()
 
-    This function checks whether the label cell and contractor entry cell resolve
-    to the same merged-cell anchor. If they do, it only writes the label and does
-    not blank the contractor cell.
-    """
-    label_cell = CELL_MAP["contractor_label"]
-    contractor_cell = CELL_MAP["contractor"]
 
-    label_anchor = get_effective_cell_address(ws, label_cell)
-    contractor_anchor = get_effective_cell_address(ws, contractor_cell)
+def format_report_date(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%m/%d/%Y")
+    return clean_line(value)
 
-    safe_set(ws, label_cell, CONTRACTOR_LABEL_TEXT)
 
-    # Only clear the contractor entry area if it is actually separate from the label.
-    # If they share one merged range, clearing contractor would erase the label.
-    if contractor_anchor != label_anchor:
-        safe_set(ws, contractor_cell, "")
+def format_report_day(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%A")
+    return ""
 
 
-def safe_set(ws, cell, value):
-    try:
-        for merged_range in ws.merged_cells.ranges:
-            if cell in merged_range:
-                top_left_cell = merged_range.coord.split(":")[0]
-                ws[top_left_cell] = value
-                return
+def format_pdf_filename(contract_number):
+    contract_number = clean_line(contract_number) or "IDOT"
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", contract_number).strip("_")
+    return f"{safe}_IDR.pdf"
 
-        ws[cell] = value
 
-    except Exception as e:
-        raise ValueError(f"Could not write value '{value}' to cell {cell}: {e}")
-
-
-def unlock_all_cells(ws):
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.protection = copy(cell.protection)
-            cell.protection = cell.protection.copy(locked=False)
-
-
-def lock_autofilled_cells(ws):
-    locked_cells = [
-        CELL_MAP["county"],
-        CELL_MAP["section"],
-        CELL_MAP["route"],
-        CELL_MAP["district"],
-        CELL_MAP["contract_number"],
-        CELL_MAP["job_number"],
-        CELL_MAP["project"],
-    ]
-
-    for cell_addr in locked_cells:
-        for merged_range in ws.merged_cells.ranges:
-            if cell_addr in merged_range:
-                top_left_cell = merged_range.coord.split(":")[0]
-                ws[top_left_cell].protection = ws[top_left_cell].protection.copy(locked=True)
-                break
-        else:
-            ws[cell_addr].protection = ws[cell_addr].protection.copy(locked=True)
-
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        # Item code, item description, and quantity stay editable.
-        # Unit is locked because it is auto-filled.
-        unit_cell = ws[f"{CELL_MAP['unit_col']}{row}"]
-        unit_cell.protection = unit_cell.protection.copy(locked=True)
-
-
-
-
-def get_merged_anchor_cell(ws, cell_address):
-    """
-    Return the real cell Excel uses for formatting/writing.
-
-    If a visible box is merged, Excel only stores the value/style on the
-    top-left cell of the merged range. Formatting a non-anchor cell inside
-    the merged range will not reliably show up in the generated workbook.
-    """
-    for merged_range in ws.merged_cells.ranges:
-        if cell_address in merged_range:
-            return merged_range.coord.split(":")[0]
-
-    return cell_address
-
-
-
-
-
-
-
-def get_description_font_size(description):
-    """Return a readable font size based on the final wrapped description text."""
-    description_length = len(clean_line(description))
-
-    for max_length, font_size in DESCRIPTION_TEXT_FIT_RULES:
-        if description_length <= max_length:
-            return font_size
-
-    return 6
-
-
-def make_font_with_size(original_font, size):
-    """
-    Build a real openpyxl Font object with the same main style settings,
-    but with a different font size.
-
-    This is more reliable than mutating a copied style object because openpyxl
-    styles are immutable/proxied internally.
-    """
-    return Font(
-        name=original_font.name,
-        sz=size,
-        b=original_font.b,
-        i=original_font.i,
-        vertAlign=original_font.vertAlign,
-        underline=original_font.underline,
-        strike=original_font.strike,
-        color=copy(original_font.color),
-        scheme=original_font.scheme,
-        family=original_font.family,
-        charset=original_font.charset,
-        outline=original_font.outline,
-        shadow=original_font.shadow,
-        condense=original_font.condense,
-        extend=original_font.extend,
-    )
-
-
-def get_text_for_cell(ws, cell_address):
-    """
-    Get the value from the actual visible cell.
-
-    If the visible cell is merged, Excel stores the value in the top-left
-    merged anchor. This function returns that anchor value.
-    """
-    anchor_address = get_merged_anchor_cell(ws, cell_address)
-    value = ws[anchor_address].value
-
-    if value is None:
-        return ""
-
-    return str(value)
-
-
-def format_item_description_cells(ws):
-    """Apply wrapped text and font-only resizing to item description cells."""
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        visible_cell_address = f"{CELL_MAP['item_description_col']}{row}"
-        anchor_cell_address = get_merged_anchor_cell(ws, visible_cell_address)
-        anchor_cell = ws[anchor_cell_address]
-
-        description_text = get_text_for_cell(ws, visible_cell_address)
-        font_size = get_description_font_size(description_text)
-
-        current_alignment = copy(anchor_cell.alignment)
-
-        anchor_cell.alignment = Alignment(
-            horizontal=current_alignment.horizontal or "left",
-            vertical="top",
-            text_rotation=current_alignment.text_rotation,
-            wrap_text=True,
-            shrink_to_fit=False,
-            indent=current_alignment.indent,
-            relativeIndent=current_alignment.relativeIndent,
-            justifyLastLine=current_alignment.justifyLastLine,
-            readingOrder=current_alignment.readingOrder,
-        )
-
-        anchor_cell.font = make_font_with_size(anchor_cell.font, font_size)
-
-        for merged_range in ws.merged_cells.ranges:
-            if visible_cell_address in merged_range:
-                for cell_row in ws.iter_rows(
-                    min_row=merged_range.min_row,
-                    max_row=merged_range.max_row,
-                    min_col=merged_range.min_col,
-                    max_col=merged_range.max_col,
-                ):
-                    for range_cell in cell_row:
-                        try:
-                            range_cell.alignment = copy(anchor_cell.alignment)
-                            range_cell.font = copy(anchor_cell.font)
-                        except Exception:
-                            pass
-                break
-
-        ws.row_dimensions[row].hidden = False
-        ws.row_dimensions[row].collapsed = False
-
-
-def create_or_replace_sheet(wb, sheet_name):
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
-
-    return wb.create_sheet(sheet_name)
-
-
-def delete_sheet_if_exists(wb, sheet_name):
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
-
-
-def write_hidden_pay_items_sheet(wb, pay_items):
-    ws = create_or_replace_sheet(wb, HIDDEN_PAY_ITEMS_SHEET_NAME)
-
-    headers = [
-        "item_code",
-        "unit",
-        "item_description",
-        "quantity",
-        "unit_price",
-    ]
-
-    for col_num, header in enumerate(headers, start=1):
-        ws.cell(row=1, column=col_num, value=header)
-
-    for row_num, (_, row) in enumerate(pay_items.iterrows(), start=2):
-        ws.cell(row=row_num, column=1, value=row.get("item_code", ""))
-        ws.cell(row=row_num, column=2, value=row.get("unit", ""))
-        ws.cell(row=row_num, column=3, value=row.get("item_description", ""))
-        ws.cell(row=row_num, column=4, value=row.get("quantity", ""))
-        ws.cell(row=row_num, column=5, value=row.get("unit_price", ""))
-
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 55
-    ws.column_dimensions["D"].width = 18
-    ws.column_dimensions["E"].width = 18
-
-    ws.sheet_state = "hidden"
-
-    return ws
-
-
-def write_job_info_sheet(wb, metadata):
-    ws = create_or_replace_sheet(wb, JOB_INFO_SHEET_NAME)
-
-    rows = [
-        ("contract_url", metadata.get("contract_url", "")),
-        ("item_contract", metadata.get("item_contract", "")),
-        ("letting_date", metadata.get("letting_date", "")),
-        ("region", metadata.get("region", "")),
-        ("district", metadata.get("district", "")),
-        ("dbe_percent", metadata.get("dbe_percent", "")),
-        ("vbp_percent", metadata.get("vbp_percent", "")),
-        ("federal_project", metadata.get("federal_project", "")),
-        ("county", metadata.get("county", "")),
-        ("key_route", metadata.get("key_route", "")),
-        ("marked_route", metadata.get("marked_route", "")),
-        ("website_section", metadata.get("website_section", "")),
-        ("state_job", metadata.get("state_job", "")),
-        ("pps", metadata.get("pps", "")),
-        ("working_days", metadata.get("working_days", "")),
-    ]
-
-    for i, (key, value) in enumerate(rows, start=1):
-        ws.cell(row=i, column=1, value=key)
-        ws.cell(row=i, column=2, value=value)
-
-    ws.column_dimensions["A"].width = 24
-    ws.column_dimensions["B"].width = 90
-    ws.sheet_state = "hidden"
-
-    return ws
-
-
-def apply_item_code_dropdown(ws, pay_items_count):
-    formula_range = f"='{HIDDEN_PAY_ITEMS_SHEET_NAME}'!$A$2:$A${pay_items_count + 1}"
-
-    dv = DataValidation(
-        type="list",
-        formula1=formula_range,
-        allow_blank=True,
-    )
-
-    ws.add_data_validation(dv)
-
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        dv.add(ws[f"{CELL_MAP['item_code_col']}{row}"])
-
-
-
-def apply_description_dropdown(ws, pay_items_count):
-    formula_range = f"='{HIDDEN_PAY_ITEMS_SHEET_NAME}'!$C$2:$C${pay_items_count + 1}"
-
-    dv = DataValidation(
-        type="list",
-        formula1=formula_range,
-        allow_blank=True,
-    )
-
-    ws.add_data_validation(dv)
-
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        dv.add(ws[f"{CELL_MAP['item_description_col']}{row}"])
-
-def add_lookup_formulas_for_blank_rows(ws, pay_items_count):
-    lookup_range = f"'{HIDDEN_PAY_ITEMS_SHEET_NAME}'!$A$2:$E${pay_items_count + 1}"
-
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        code_cell = f"{CELL_MAP['item_code_col']}{row}"
-        desc_cell = f"{CELL_MAP['item_description_col']}{row}"
-        unit_cell = f"{CELL_MAP['unit_col']}{row}"
-
-        # Unit is formula-driven only.
-        # It checks item description first because when the user selects an item,
-        # the description cell changes immediately.
-        # Then it falls back to item code.
-        ws[unit_cell] = (
-            f'=IF({desc_cell}<>"",'
-            f'IFERROR(INDEX(\'{HIDDEN_PAY_ITEMS_SHEET_NAME}\'!$B$2:$B${pay_items_count + 1},'
-            f'MATCH({desc_cell},\'{HIDDEN_PAY_ITEMS_SHEET_NAME}\'!$C$2:$C${pay_items_count + 1},0)),""),'
-            f'IF({code_cell}<>"",'
-            f'IFERROR(VLOOKUP({code_cell},{lookup_range},2,FALSE),""),'
-            f'""))'
-        )
-
-def apply_quantity_conditional_formatting(ws, pay_items_count):
-    start_row = CELL_MAP["start_row"]
-    end_row = CELL_MAP["end_row"]
-
-    code_col = CELL_MAP["item_code_col"]
-    desc_col = CELL_MAP["item_description_col"]
-    quantity_col = CELL_MAP["quantity_col"]
-
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-
-    lookup_range = f"'{HIDDEN_PAY_ITEMS_SHEET_NAME}'!$A$2:$E${pay_items_count + 1}"
-
-    for row in range(start_row, end_row + 1):
-        code_cell = f"${code_col}${row}"
-        desc_cell = f"${desc_col}${row}"
-        qty_cell = f"${quantity_col}${row}"
-        qty_range = f"{quantity_col}{row}"
-
-        # Look up the max/plan quantity from item description first,
-        # then fall back to item code.
-        max_qty_formula = (
-            f'IF({desc_cell}<>"",'
-            f'INDEX(\'{HIDDEN_PAY_ITEMS_SHEET_NAME}\'!$D$2:$D${pay_items_count + 1},'
-            f'MATCH({desc_cell},\'{HIDDEN_PAY_ITEMS_SHEET_NAME}\'!$C$2:$C${pay_items_count + 1},0)),'
-            f'IF({code_cell}<>"",'
-            f'VLOOKUP({code_cell},{lookup_range},4,FALSE),'
-            f'0))'
-        )
-
-        # Convert both the entered quantity and max quantity to numbers.
-        # This fixes cases where IDOT quantities have commas or are stored as text.
-        entered_qty_number = f'VALUE(SUBSTITUTE({qty_cell},",",""))'
-        max_qty_number = f'VALUE(SUBSTITUTE({max_qty_formula},",",""))'
-
-        has_item_formula = f'OR({code_cell}<>"",{desc_cell}<>"")'
-
-        # Red: actual quantity is greater than the allowed/plan quantity.
-        ws.conditional_formatting.add(
-            qty_range,
-            FormulaRule(
-                formula=[
-                    f'AND({qty_cell}<>"",{has_item_formula},IFERROR({entered_qty_number}>{max_qty_number},FALSE))'
-                ],
-                fill=red_fill,
-                stopIfTrue=True,
-            )
-        )
-
-        # Yellow: actual quantity is close, from 90% to 100% of allowed/plan quantity.
-        ws.conditional_formatting.add(
-            qty_range,
-            FormulaRule(
-                formula=[
-                    f'AND({qty_cell}<>"",{has_item_formula},IFERROR({entered_qty_number}>={max_qty_number}*0.9,FALSE),IFERROR({entered_qty_number}<={max_qty_number},FALSE))'
-                ],
-                fill=yellow_fill,
-                stopIfTrue=True,
-            )
-        )
-
-        # Green: actual quantity is below 90% of allowed/plan quantity.
-        ws.conditional_formatting.add(
-            qty_range,
-            FormulaRule(
-                formula=[
-                    f'AND({qty_cell}<>"",{has_item_formula},IFERROR({entered_qty_number}<{max_qty_number}*0.9,FALSE))'
-                ],
-                fill=green_fill,
-                stopIfTrue=True,
-            )
-        )
-
-def clear_old_idr_values(ws):
-    clear_cells = [
-        CELL_MAP["date"],
-        CELL_MAP["work_description"],
-        CELL_MAP["weather"],
-        CELL_MAP["remarks"],
-
-        CELL_MAP["county"],
-        CELL_MAP["section"],
-        CELL_MAP["route"],
-        CELL_MAP["district"],
-        CELL_MAP["contract_number"],
-        CELL_MAP["job_number"],
-        CELL_MAP["project"],
-    ]
-
-    for cell in clear_cells:
-        safe_set(ws, cell, None)
-
-    for row in range(CELL_MAP["start_row"], CELL_MAP["end_row"] + 1):
-        safe_set(ws, f"{CELL_MAP['item_code_col']}{row}", None)
-        safe_set(ws, f"{CELL_MAP['item_description_col']}{row}", None)
-        safe_set(ws, f"{CELL_MAP['location_col']}{row}", None)
-        safe_set(ws, f"{CELL_MAP['quantity_col']}{row}", None)
-        safe_set(ws, f"{CELL_MAP['unit_col']}{row}", None)
-
-
-
-def prepare_pay_items_for_lookup(pay_items):
-    """Normalize the IDOT pay-item table so Streamlit can replace the VBA lookup behavior."""
+def dataframe_records_by_code(pay_items):
+    records = {}
     if pay_items is None or pay_items.empty:
-        return pd.DataFrame(columns=["item_code", "unit", "item_description", "quantity", "unit_price"])
-
-    df = pay_items.copy()
-
-    for col in ["item_code", "unit", "item_description", "quantity", "unit_price"]:
-        if col not in df.columns:
-            df[col] = ""
-
-    df["item_code"] = df["item_code"].astype(str).map(clean_line).str.upper()
-    df["unit"] = df["unit"].astype(str).map(clean_line).str.upper().map(normalize_unit)
-    df["item_description"] = df["item_description"].astype(str).map(clean_line)
-    df["quantity"] = df["quantity"].astype(str).map(clean_line)
-    df["unit_price"] = df["unit_price"].astype(str).map(clean_line)
-
-    df = df[df["item_code"] != ""]
-    df = df.drop_duplicates(subset=["item_code"], keep="first").reset_index(drop=True)
-    return df[["item_code", "unit", "item_description", "quantity", "unit_price"]]
+        return records
+    for _, row in pay_items.iterrows():
+        code = normalize_pay_item_code(row.get("item_code", ""))
+        if code and code not in records:
+            records[code] = {
+                "item_code": code,
+                "item_description": clean_line(row.get("item_description", "")),
+                "unit": normalize_unit(row.get("unit", "")),
+                "plan_quantity": clean_line(row.get("quantity", "")),
+                "unit_price": clean_line(row.get("unit_price", "")),
+                "is_custom": False,
+            }
+    return records
 
 
-def make_blank_idr_rows(row_count=6):
+def dataframe_records_by_description(pay_items):
+    records = {}
+    if pay_items is None or pay_items.empty:
+        return records
+    for _, row in pay_items.iterrows():
+        desc = clean_line(row.get("item_description", ""))
+        if desc and desc not in records:
+            code = normalize_pay_item_code(row.get("item_code", ""))
+            records[desc] = {
+                "item_code": code,
+                "item_description": desc,
+                "unit": normalize_unit(row.get("unit", "")),
+                "plan_quantity": clean_line(row.get("quantity", "")),
+                "unit_price": clean_line(row.get("unit_price", "")),
+                "is_custom": False,
+            }
+    return records
+
+
+def resolve_line_item(pay_items, lookup_mode, selected_code, selected_description, custom_code, custom_description, custom_unit, location, quantity):
+    by_code = dataframe_records_by_code(pay_items)
+    by_desc = dataframe_records_by_description(pay_items)
+
+    if lookup_mode == "Custom Item":
+        return {
+            "item_code": normalize_pay_item_code(custom_code),
+            "item_description": clean_line(custom_description),
+            "unit": normalize_unit(custom_unit),
+            "location": clean_line(location),
+            "quantity": clean_line(quantity),
+            "plan_quantity": "",
+            "unit_price": "",
+            "is_custom": True,
+        }
+
+    if lookup_mode == "Item Code":
+        item = by_code.get(normalize_pay_item_code(selected_code), {}).copy()
+    else:
+        item = by_desc.get(clean_line(selected_description), {}).copy()
+
+    if not item:
+        item = {
+            "item_code": normalize_pay_item_code(selected_code),
+            "item_description": clean_line(selected_description),
+            "unit": "",
+            "plan_quantity": "",
+            "unit_price": "",
+            "is_custom": False,
+        }
+
+    item["location"] = clean_line(location)
+    item["quantity"] = clean_line(quantity)
+    item["unit"] = normalize_unit(item.get("unit", ""))
+    return item
+
+
+def build_idr_rows_form(pay_items):
+    code_options = [""] + sorted(dataframe_records_by_code(pay_items).keys())
+    description_options = [""] + sorted(dataframe_records_by_description(pay_items).keys())
+
     rows = []
 
-    for _ in range(row_count):
-        rows.append({
-            "custom_item": False,
-            "item_code": "",
-            "item_description": "",
-            "location": "",
-            "quantity": "",
-            "unit": "",
-        })
+    st.subheader("IDR Pay Item Rows")
+    st.caption("Each row can be filled by item code, by item description, or as a custom pay item. The website autofills the matching code, description, and unit before creating the PDF.")
 
-    return pd.DataFrame(rows)
+    for idx in range(PDF_ROW_COUNT):
+        row_num = idx + 1
+        with st.expander(f"Pay Item Row {row_num}", expanded=(idx == 0)):
+            lookup_mode = st.radio(
+                "Fill this row by",
+                ["Item Code", "Item Description", "Custom Item"],
+                horizontal=True,
+                key=f"lookup_mode_{idx}",
+            )
+
+            selected_code = ""
+            selected_description = ""
+            custom_code = ""
+            custom_description = ""
+            custom_unit = ""
+
+            if lookup_mode == "Item Code":
+                selected_code = st.selectbox(
+                    "Item Code",
+                    code_options,
+                    key=f"selected_code_{idx}",
+                )
+                selected_item = dataframe_records_by_code(pay_items).get(selected_code, {})
+
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.text_input(
+                        "Autofilled Item Description",
+                        value=selected_item.get("item_description", ""),
+                        disabled=True,
+                        key=f"autofill_desc_from_code_{idx}",
+                    )
+                with c2:
+                    st.text_input(
+                        "Autofilled Unit",
+                        value=selected_item.get("unit", ""),
+                        disabled=True,
+                        key=f"autofill_unit_from_code_{idx}",
+                    )
+
+            elif lookup_mode == "Item Description":
+                selected_description = st.selectbox(
+                    "Item Description",
+                    description_options,
+                    key=f"selected_desc_{idx}",
+                )
+                selected_item = dataframe_records_by_description(pay_items).get(selected_description, {})
+
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    st.text_input(
+                        "Autofilled Item Code",
+                        value=selected_item.get("item_code", ""),
+                        disabled=True,
+                        key=f"autofill_code_from_desc_{idx}",
+                    )
+                with c2:
+                    st.text_input(
+                        "Autofilled Unit",
+                        value=selected_item.get("unit", ""),
+                        disabled=True,
+                        key=f"autofill_unit_from_desc_{idx}",
+                    )
+
+            else:
+                c1, c2, c3 = st.columns([1, 3, 1])
+                with c1:
+                    custom_code = st.text_input("Custom Item Code", key=f"custom_code_{idx}")
+                with c2:
+                    custom_description = st.text_input("Custom Item Description", key=f"custom_desc_{idx}")
+                with c3:
+                    custom_unit = st.text_input("Custom Unit", key=f"custom_unit_{idx}")
+
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                location = st.text_input("Location", key=f"location_{idx}")
+            with c2:
+                quantity = st.text_input("Quantity Used", key=f"quantity_{idx}")
+
+            rows.append(resolve_line_item(
+                pay_items=pay_items,
+                lookup_mode=lookup_mode,
+                selected_code=selected_code,
+                selected_description=selected_description,
+                custom_code=custom_code,
+                custom_description=custom_description,
+                custom_unit=custom_unit,
+                location=location,
+                quantity=quantity,
+            ))
+
+    return rows
 
 
-def resolve_idr_rows(input_rows, pay_items):
-    """
-    Replace the old Worksheet_Change macro behavior.
+def wrap_text_to_lines(text, max_chars, max_lines):
+    text = clean_line(text)
+    if not text:
+        return [""]
 
-    - If custom_item is checked, keep the user's code/description/unit.
-    - If item_code matches IDOT, fill official description and unit.
-    - If description matches IDOT, fill official code and unit.
-    - If no match, keep user-entered values as a custom row.
-    """
-    pay_items = prepare_pay_items_for_lookup(pay_items)
+    words = text.split()
+    lines = []
+    current = ""
 
-    by_code = {}
-    by_description = {}
-
-    for _, row in pay_items.iterrows():
-        code_key = normalize_pay_item_code(row.get("item_code", ""))
-        desc_key = clean_line(row.get("item_description", "")).lower()
-
-        if code_key:
-            by_code[code_key] = row
-
-        if desc_key:
-            by_description[desc_key] = row
-
-    resolved_rows = []
-
-    if input_rows is None or input_rows.empty:
-        input_rows = make_blank_idr_rows()
-
-    for _, user_row in input_rows.iterrows():
-        custom_item = bool(user_row.get("custom_item", False))
-        entered_code = normalize_pay_item_code(user_row.get("item_code", ""))
-        entered_description = clean_line(user_row.get("item_description", ""))
-        entered_location = clean_line(user_row.get("location", ""))
-        entered_quantity = clean_line(user_row.get("quantity", ""))
-        entered_unit = normalize_unit(user_row.get("unit", ""))
-
-        if not any([entered_code, entered_description, entered_location, entered_quantity, entered_unit]):
-            continue
-
-        matched = None
-
-        if not custom_item and entered_code in by_code:
-            matched = by_code[entered_code]
-        elif not custom_item and entered_description.lower() in by_description:
-            matched = by_description[entered_description.lower()]
-
-        if matched is not None:
-            resolved_rows.append({
-                "custom_item": False,
-                "item_code": matched.get("item_code", entered_code),
-                "item_description": matched.get("item_description", entered_description),
-                "location": entered_location,
-                "quantity": entered_quantity,
-                "unit": matched.get("unit", entered_unit),
-                "plan_quantity": matched.get("quantity", ""),
-                "unit_price": matched.get("unit_price", ""),
-            })
+    for word in words:
+        test = word if not current else current + " " + word
+        if len(test) <= max_chars:
+            current = test
         else:
-            resolved_rows.append({
-                "custom_item": True,
-                "item_code": entered_code,
-                "item_description": entered_description,
-                "location": entered_location,
-                "quantity": entered_quantity,
-                "unit": entered_unit,
-                "plan_quantity": "",
-                "unit_price": "",
-            })
+            if current:
+                lines.append(current)
+            current = word
 
-    return pd.DataFrame(resolved_rows, columns=[
-        "custom_item",
-        "item_code",
-        "item_description",
-        "location",
-        "quantity",
-        "unit",
-        "plan_quantity",
-        "unit_price",
-    ])
+        if len(lines) >= max_lines:
+            break
+
+    if current and len(lines) < max_lines:
+        lines.append(current)
+
+    if len(lines) == max_lines and len(" ".join(words)) > len(" ".join(lines)):
+        lines[-1] = lines[-1][:max(0, max_chars - 3)].rstrip() + "..."
+
+    return lines or [""]
 
 
-def apply_manual_quantity_colors(ws, resolved_rows):
-    """Apply the old quantity warning colors directly instead of relying on macro/formula behavior."""
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+def draw_label_value(c, label, value, x, y, width, height=18, field_name=None, editable=True, font_size=8):
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(x, y + height + 3, label)
+    c.rect(x, y, width, height, stroke=1, fill=0)
 
-    for i, (_, row_data) in enumerate(resolved_rows.iterrows()):
-        excel_row = CELL_MAP["start_row"] + i
-        qty_cell = ws[f"{CELL_MAP['quantity_col']}{excel_row}"]
+    value = clean_line(value)
+    if editable and field_name:
+        c.acroForm.textfield(
+            name=field_name,
+            value=value,
+            x=x + 2,
+            y=y + 2,
+            width=width - 4,
+            height=height - 4,
+            borderWidth=0,
+            fontName="Helvetica",
+            fontSize=font_size,
+            textColor=colors.black,
+            fillColor=None,
+            forceBorder=False,
+        )
+    else:
+        c.setFont("Helvetica", font_size)
+        c.drawString(x + 2, y + 5, value[:80])
 
-        try:
-            entered_qty = float(str(row_data.get("quantity", "")).replace(",", ""))
-            plan_qty = float(str(row_data.get("plan_quantity", "")).replace(",", ""))
-        except Exception:
-            continue
 
-        if plan_qty <= 0:
-            continue
+def draw_multiline_field(c, name, value, x, y, width, height, font_size=7):
+    c.rect(x, y, width, height, stroke=1, fill=0)
+    value = clean_line(value)
 
-        if entered_qty > plan_qty:
-            qty_cell.fill = red_fill
-        elif entered_qty >= plan_qty * 0.9:
-            qty_cell.fill = yellow_fill
-        else:
-            qty_cell.fill = green_fill
-
-
-def fill_idr_template(metadata, pay_items, idr_inputs, idr_rows):
-    """Create a finished macro-free .xlsx IDR using Python instead of VBA macros."""
-    wb = load_workbook(TEMPLATE_PATH, keep_vba=False)
-    ws = wb["IDR_Form"] if "IDR_Form" in wb.sheetnames else wb.active
-
-    clear_old_idr_values(ws)
-
-    safe_set(ws, CELL_MAP["date"], idr_inputs.get("date", ""))
-
-    contractor_text = idr_inputs.get("contractor", "")
-    write_contractor_section(ws)
-
-    label_anchor = get_effective_cell_address(ws, CELL_MAP["contractor_label"])
-    contractor_anchor = get_effective_cell_address(ws, CELL_MAP["contractor"])
-
-    if contractor_text:
-        if label_anchor == contractor_anchor:
-            safe_set(ws, CELL_MAP["contractor_label"], f"{CONTRACTOR_LABEL_TEXT}: {contractor_text}")
-        else:
-            safe_set(ws, CELL_MAP["contractor"], contractor_text)
-
-    safe_set(ws, CELL_MAP["work_description"], idr_inputs.get("work_description", ""))
-    safe_set(ws, CELL_MAP["weather"], idr_inputs.get("weather", ""))
-    safe_set(ws, CELL_MAP["remarks"], idr_inputs.get("remarks", ""))
-
-    safe_set(ws, CELL_MAP["county"], metadata.get("county", ""))
-    safe_set(ws, CELL_MAP["section"], metadata.get("key_route", ""))
-    safe_set(ws, CELL_MAP["route"], metadata.get("marked_route", ""))
-    safe_set(ws, CELL_MAP["district"], metadata.get("district", ""))
-    safe_set(ws, CELL_MAP["contract_number"], metadata.get("item_contract", ""))
-    safe_set(ws, CELL_MAP["job_number"], metadata.get("state_job", ""))
-    safe_set(ws, CELL_MAP["project"], metadata.get("federal_project", ""))
-
-    delete_sheet_if_exists(wb, OLD_MATERIALS_SHEET_NAME)
-
-    pay_items = prepare_pay_items_for_lookup(pay_items)
-    resolved_rows = resolve_idr_rows(idr_rows, pay_items)
-
-    # Include hidden source data for traceability, but do not use formulas or macros.
-    write_job_info_sheet(wb, metadata)
-    write_hidden_pay_items_sheet(wb, pay_items)
-
-    max_rows = CELL_MAP["end_row"] - CELL_MAP["start_row"] + 1
-    resolved_rows = resolved_rows.head(max_rows)
-
-    for i, (_, row_data) in enumerate(resolved_rows.iterrows()):
-        excel_row = CELL_MAP["start_row"] + i
-
-        safe_set(ws, f"{CELL_MAP['item_code_col']}{excel_row}", row_data.get("item_code", ""))
-        safe_set(ws, f"{CELL_MAP['item_description_col']}{excel_row}", row_data.get("item_description", ""))
-        safe_set(ws, f"{CELL_MAP['location_col']}{excel_row}", row_data.get("location", ""))
-        safe_set(ws, f"{CELL_MAP['quantity_col']}{excel_row}", row_data.get("quantity", ""))
-        safe_set(ws, f"{CELL_MAP['unit_col']}{excel_row}", row_data.get("unit", ""))
-
-    apply_manual_quantity_colors(ws, resolved_rows)
-    format_item_description_cells(ws)
-
-    unlock_all_cells(ws)
-    lock_autofilled_cells(ws)
-
-    ws.protection.sheet = True
-    ws.protection.enable()
-
+    # ReportLab textfield supports basic AcroForm fields. Many PDF viewers allow editing these fields.
     try:
-        wb.calculation.fullCalcOnLoad = True
-        wb.calculation.forceFullCalc = True
-        wb.calculation.calcMode = "auto"
-    except Exception:
-        pass
+        c.acroForm.textfield(
+            name=name,
+            value=value,
+            x=x + 2,
+            y=y + 2,
+            width=width - 4,
+            height=height - 4,
+            borderWidth=0,
+            fontName="Helvetica",
+            fontSize=font_size,
+            textColor=colors.black,
+            fillColor=None,
+            forceBorder=False,
+            fieldFlags="multiline",
+        )
+    except TypeError:
+        # Older reportlab versions may not accept fieldFlags as a string.
+        c.setFont("Helvetica", font_size)
+        lines = wrap_text_to_lines(value, 55, 4)
+        text_y = y + height - 10
+        for line in lines:
+            c.drawString(x + 2, text_y, line)
+            text_y -= font_size + 2
+
+
+def make_fillable_idr_pdf(metadata, idr_info, rows):
+    if canvas is None:
+        raise RuntimeError("The reportlab package is required. Add reportlab to requirements.txt.")
 
     output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
+    c = canvas.Canvas(output, pagesize=landscape(letter))
+    page_width, page_height = landscape(letter)
 
-    return output, resolved_rows
+    margin = 28
+    top = page_height - margin
+
+    report_date = idr_info.get("date", get_today_default())
+    report_date_text = format_report_date(report_date)
+    report_day_text = format_report_day(report_date)
+
+    # Title
+    c.setFont("Helvetica-Bold", 15)
+    c.drawCentredString(page_width / 2, top - 5, "IDOT INSPECTOR DAILY REPORT")
+    c.setFont("Helvetica", 8)
+    c.drawCentredString(page_width / 2, top - 18, "Generated from the Streamlit IDR website - macro-free PDF")
+
+    # Header date blocks. Top-left and top-right update from selected date.
+    draw_label_value(c, "Date", report_date_text, margin, top - 42, 90, field_name="top_left_date")
+    draw_label_value(c, "Day", report_day_text, margin + 98, top - 42, 90, field_name="top_left_day")
+    draw_label_value(c, "Report Date", report_date_text, page_width - margin - 190, top - 42, 90, field_name="top_right_date")
+    draw_label_value(c, "Day", report_day_text, page_width - margin - 92, top - 42, 92, field_name="top_right_day")
+
+    # Job info blocks.
+    y = top - 82
+    left_x = margin
+    mid_x = margin + 260
+    right_x = margin + 520
+
+    draw_label_value(c, "Contractor or Sub.", idr_info.get("contractor", ""), left_x, y, 230, field_name="contractor")
+    draw_label_value(c, "Weather", idr_info.get("weather", ""), mid_x, y, 120, field_name="weather")
+    draw_label_value(c, "Contract No.", metadata.get("item_contract", ""), right_x, y, 110, field_name="contract_no")
+    draw_label_value(c, "Job No.", metadata.get("state_job", ""), right_x + 118, y, 110, field_name="job_no")
+
+    y -= 40
+    draw_label_value(c, "County", metadata.get("county", ""), left_x, y, 150, field_name="county")
+    draw_label_value(c, "Section", metadata.get("key_route", ""), left_x + 160, y, 170, field_name="section")
+    draw_label_value(c, "Route", metadata.get("marked_route", ""), left_x + 340, y, 180, field_name="route")
+    draw_label_value(c, "District", metadata.get("district", ""), left_x + 530, y, 70, field_name="district")
+    draw_label_value(c, "Project", metadata.get("federal_project", ""), left_x + 610, y, 120, field_name="project")
+
+    y -= 47
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(left_x, y + 24, "Work Description")
+    draw_multiline_field(c, "work_description", idr_info.get("work_description", ""), left_x, y - 5, page_width - (2 * margin), 28, font_size=7)
+
+    # Pay item table.
+    table_top = y - 25
+    row_h = 45
+    headers = [
+        ("Item Code", 82),
+        ("Item Description", 255),
+        ("Location", 150),
+        ("Quantity", 70),
+        ("Unit", 62),
+        ("Custom?", 54),
+    ]
+
+    x = margin
+    c.setFillColor(colors.lightgrey)
+    c.rect(x, table_top - 17, sum(w for _, w in headers), 17, stroke=1, fill=1)
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 7)
+    cx = x
+    for label, w in headers:
+        c.drawString(cx + 3, table_top - 12, label)
+        c.rect(cx, table_top - 17, w, 17, stroke=1, fill=0)
+        cx += w
+
+    start_y = table_top - 17
+    for i in range(PDF_ROW_COUNT):
+        row = rows[i] if i < len(rows) else {}
+        row_y = start_y - ((i + 1) * row_h)
+        cx = x
+
+        code = clean_line(row.get("item_code", ""))
+        desc = clean_line(row.get("item_description", ""))
+        loc = clean_line(row.get("location", ""))
+        qty = clean_line(row.get("quantity", ""))
+        unit = clean_line(row.get("unit", ""))
+        custom = "Yes" if row.get("is_custom") else ""
+
+        values = [code, desc, loc, qty, unit, custom]
+        field_names = [
+            f"row_{i+1}_item_code",
+            f"row_{i+1}_item_description",
+            f"row_{i+1}_location",
+            f"row_{i+1}_quantity",
+            f"row_{i+1}_unit",
+            f"row_{i+1}_custom",
+        ]
+
+        for (label, w), value, field_name in zip(headers, values, field_names):
+            c.rect(cx, row_y, w, row_h, stroke=1, fill=0)
+            if label == "Item Description":
+                draw_multiline_field(c, field_name, value, cx, row_y, w, row_h, font_size=6)
+            else:
+                try:
+                    c.acroForm.textfield(
+                        name=field_name,
+                        value=value,
+                        x=cx + 2,
+                        y=row_y + 14,
+                        width=w - 4,
+                        height=14,
+                        borderWidth=0,
+                        fontName="Helvetica",
+                        fontSize=7,
+                        textColor=colors.black,
+                        fillColor=None,
+                        forceBorder=False,
+                    )
+                except Exception:
+                    c.setFont("Helvetica", 7)
+                    c.drawString(cx + 3, row_y + row_h - 12, value[:20])
+            cx += w
+
+    # Remarks area.
+    remarks_y = margin + 34
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(margin, remarks_y + 42, "Remarks / Notes")
+    draw_multiline_field(c, "remarks", idr_info.get("remarks", ""), margin, remarks_y, page_width - (2 * margin), 40, font_size=7)
+
+    # Signature fields.
+    sig_y = margin
+    draw_label_value(c, "Inspector Name", idr_info.get("inspector", ""), margin, sig_y, 200, field_name="inspector")
+    draw_label_value(c, "Signature", "", margin + 220, sig_y, 220, field_name="signature")
+    draw_label_value(c, "Date", report_date_text, margin + 460, sig_y, 100, field_name="signature_date")
+
+    c.showPage()
+    c.save()
+    output.seek(0)
+    return output
 
 
 def make_pay_items_excel(metadata, pay_items):
@@ -2171,18 +1957,21 @@ def make_pay_items_excel(metadata, pay_items):
 # ============================================================
 
 st.set_page_config(
-    page_title="IDOT Job IDR Generator",
+    page_title="IDOT Job IDR PDF Generator",
     page_icon="📄",
     layout="wide",
 )
 
-st.title("IDOT Job IDR Generator")
+st.title("IDOT Job IDR PDF Generator")
 
 st.write(
     "Enter an IDOT job/contract number or paste the direct IDOT contract URL. "
-    "The app pulls the job information and pay items, lets you complete the IDR online, "
-    "then creates a macro-free .xlsx file."
+    "The app pulls the job information and pay items, then creates a macro-free editable PDF."
 )
+
+if canvas is None:
+    st.error("Missing dependency: reportlab. Add reportlab to requirements.txt and redeploy the app.")
+    st.stop()
 
 with st.sidebar:
     st.header("Job Lookup")
@@ -2192,7 +1981,7 @@ with st.sidebar:
         placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
     )
 
-    st.caption("The downloaded IDR is .xlsx only. No VBA macros are needed.")
+    st.caption("No Excel macros are used. The website creates a fillable PDF output.")
 
 
 if "metadata" not in st.session_state:
@@ -2204,37 +1993,26 @@ if "pay_items" not in st.session_state:
 if "match" not in st.session_state:
     st.session_state.match = None
 
-if "idr_rows" not in st.session_state:
-    st.session_state.idr_rows = make_blank_idr_rows()
-
 if st.button("Find IDOT Job"):
     try:
-        if not TEMPLATE_PATH.exists():
-            st.error(
-                f"Template file not found.\n\n"
-                f"Put IDR_template.xlsx in the same folder as this app file.\n\n"
-                "Expected one of:\n" + "\n".join(str(path) for path in TEMPLATE_CANDIDATES)
+        with st.spinner("Searching IDOT Transportation Bulletin archives newest to oldest..."):
+            metadata, pay_items, match = fetch_idot_job(job_number)
+
+        st.session_state.metadata = metadata
+        st.session_state.pay_items = pay_items
+        st.session_state.match = match
+
+        st.success(
+            f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items."
+        )
+
+        if match.get("letting_url"):
+            st.info(
+                f"Found on letting/archive page: {match.get('letting', '')}, "
+                f"page {match.get('page', '')}"
             )
         else:
-            with st.spinner("Searching IDOT Transportation Bulletin archives newest to oldest..."):
-                metadata, pay_items, match = fetch_idot_job(job_number)
-
-            st.session_state.metadata = metadata
-            st.session_state.pay_items = prepare_pay_items_for_lookup(pay_items)
-            st.session_state.match = match
-            st.session_state.idr_rows = make_blank_idr_rows()
-
-            st.success(
-                f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items."
-            )
-
-            if match.get("letting_url"):
-                st.info(
-                    f"Found on letting/archive page: {match.get('letting', '')}, "
-                    f"page {match.get('page', '')}"
-                )
-            else:
-                st.info(f"Found using: {match.get('letting', '')}")
+            st.info(f"Found using: {match.get('letting', '')}")
 
     except Exception as e:
         st.error(str(e))
@@ -2261,25 +2039,11 @@ if metadata is not None:
         st.warning(
             "Some job fields did not parse correctly: "
             + ", ".join(missing_fields)
-            + ". You can correct them below before generating the IDR."
+            + ". You can still generate the PDF, then edit those fields inside the PDF if needed."
         )
 
-    with st.expander("Review / edit auto-filled job fields", expanded=bool(missing_fields)):
-        c1, c2, c3 = st.columns(3)
-
-        with c1:
-            metadata["county"] = st.text_input("County", metadata.get("county", ""))
-            metadata["key_route"] = st.text_input("Section / Key Route", metadata.get("key_route", ""))
-            metadata["marked_route"] = st.text_input("Route / Marked Route", metadata.get("marked_route", ""))
-
-        with c2:
-            metadata["district"] = st.text_input("District", metadata.get("district", ""))
-            metadata["item_contract"] = st.text_input("Contract No.", metadata.get("item_contract", ""))
-            metadata["state_job"] = st.text_input("Job No.", metadata.get("state_job", ""))
-
-        with c3:
-            metadata["federal_project"] = st.text_input("Project", metadata.get("federal_project", ""))
-            metadata["working_days"] = st.text_input("Working Days", metadata.get("working_days", ""))
+        with st.expander("Parser debug info"):
+            st.write(metadata)
 
     col1, col2, col3 = st.columns(3)
 
@@ -2300,69 +2064,23 @@ if metadata is not None:
 if metadata is not None and not pay_items.empty:
     st.subheader("IDR Header Fields")
 
-    header_col1, header_col2 = st.columns(2)
-
-    with header_col1:
-        idr_date = st.date_input("Date")
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        idr_date = st.date_input("IDR Date", value=get_today_default())
+    with c2:
         contractor = st.text_input("Contractor or Subcontractor")
-        work_description = st.text_area("Work Description", height=90)
+    with c3:
+        weather = st.selectbox("Weather", [""] + PDF_WEATHER_OPTIONS)
 
-    with header_col2:
-        weather = st.selectbox(
-            "Weather",
-            ["", "Sunny", "Cloudy", "Light rain", "Normal rain", "Heavy rain", "Snow"],
-        )
-        remarks = st.text_area("Remarks / Notes", height=140)
+    work_description = st.text_area("Work Description", height=70)
+    remarks = st.text_area("Remarks / Notes", height=80)
+    inspector = st.text_input("Inspector Name")
 
-    st.subheader("IDR Pay Item Lines")
+    st.divider()
 
-    st.write(
-        "Fill up to 6 IDR lines. Enter either an IDOT item code or item description and the app will fill the matching fields. "
-        "For non-IDOT/custom work, check Custom Item and enter the code, description, and unit yourself."
-    )
+    rows = build_idr_rows_form(pay_items)
 
-    edited_idr_rows = st.data_editor(
-        st.session_state.idr_rows,
-        key="idr_line_editor",
-        num_rows="fixed",
-        use_container_width=True,
-        column_config={
-            "custom_item": st.column_config.CheckboxColumn(
-                "Custom Item",
-                help="Check this when the item is not in the IDOT pay-item table.",
-            ),
-            "item_code": st.column_config.TextColumn(
-                "Item Code / ID",
-                help="Type an official IDOT code to autofill description/unit, or type a custom ID.",
-            ),
-            "item_description": st.column_config.TextColumn(
-                "Item Description",
-                help="Type an official description to autofill code/unit, or type a custom description.",
-            ),
-            "location": st.column_config.TextColumn("Location"),
-            "quantity": st.column_config.TextColumn("Quantity Used"),
-            "unit": st.column_config.TextColumn(
-                "Unit",
-                help="Filled automatically for official IDOT items. Type this yourself for custom items.",
-            ),
-        },
-    )
-
-    resolved_preview = resolve_idr_rows(edited_idr_rows, pay_items)
-
-    if len(resolved_preview) > 6:
-        st.warning("Only the first 6 nonblank IDR lines will be placed on the printed IDR form.")
-
-    with st.expander("Preview resolved IDR rows before download", expanded=True):
-        st.dataframe(
-            resolved_preview[["item_code", "item_description", "location", "quantity", "unit", "custom_item"]],
-            use_container_width=True,
-        )
-
-    st.subheader("Pay Items Pulled from IDOT")
-
-    with st.expander("View full IDOT pay-item table"):
-        st.dataframe(pay_items, use_container_width=True)
+    st.divider()
 
     col_a, col_b = st.columns(2)
 
@@ -2377,36 +2095,25 @@ if metadata is not None and not pay_items.empty:
         )
 
     with col_b:
-        idr_inputs = {
-            "date": idr_date.strftime("%m/%d/%Y") if idr_date else "",
+        idr_info = {
+            "date": idr_date,
             "contractor": contractor,
-            "work_description": work_description,
             "weather": weather,
+            "work_description": work_description,
             "remarks": remarks,
+            "inspector": inspector,
         }
 
-        if st.button("Generate IDR Draft Excel"):
-            try:
-                if not TEMPLATE_PATH.exists():
-                    st.error(
-                        f"Template file not found.\n\n"
-                        f"Put IDR_template.xlsx in the same folder as this app file.\n\n"
-                        "Expected one of:\n" + "\n".join(str(path) for path in TEMPLATE_CANDIDATES)
-                    )
-                else:
-                    output, _ = fill_idr_template(
-                        metadata=metadata,
-                        pay_items=pay_items,
-                        idr_inputs=idr_inputs,
-                        idr_rows=edited_idr_rows,
-                    )
+        try:
+            pdf_file = make_fillable_idr_pdf(metadata, idr_info, rows)
+            st.download_button(
+                label="Download Editable IDR PDF",
+                data=pdf_file,
+                file_name=format_pdf_filename(metadata.get("item_contract", "IDOT")),
+                mime="application/pdf",
+            )
+        except Exception as e:
+            st.error(f"Could not generate PDF: {e}")
 
-                    st.download_button(
-                        label="Download Macro-Free IDR Draft (.xlsx)",
-                        data=output,
-                        file_name=f"{metadata.get('item_contract', 'IDOT')}_IDR_Draft.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-
-            except Exception as e:
-                st.error(f"Could not generate IDR: {e}")
+    with st.expander("Preview selected/resolved IDR rows"):
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
