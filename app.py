@@ -1717,9 +1717,26 @@ def quantity_status_badge_html(quantity, plan_quantity):
 
 
 def build_idr_header_form():
-    st.subheader("IDR Header")
-    st.caption("These fields map to the same lines on the Excel IDR form.")
+    st.subheader("IDR Header / Top of Form")
+    st.caption(
+        "Fill these boxes exactly like the top and signature sections of the Excel IDR. "
+        "The labels shown here explain where each value prints on the final PDF."
+    )
 
+    with st.expander("Show field guide", expanded=False):
+        st.markdown(
+            """
+            - **Date** → prints in the top-left date box and also fills the date boxes beside Inspected/Measured/Calculated/Checked.
+            - **Contractor or Sub.** → prints on the Contractor/Subcontractor line.
+            - **Weather** → prints on the Weather line.
+            - **Inspected by / Measured by / Calculated by / Checked by** → prints in the signature/initial boxes on the right side of the form.
+            - **This is** → checks either Estimated Progress Measurement or Final Field Measurement.
+            - **Estimated item no. / Final item no.** → prints inside the parentheses beside the selected measurement checkbox.
+            - **Remarks** → prints in the Remarks box near the bottom of the form.
+            """
+        )
+
+    st.markdown("**Top form fields**")
     row1 = st.columns([1.0, 2.0, 1.4, 1.1, 1.1, 1.1, 1.1])
     with row1[0]:
         idr_date = st.date_input("Date", value=get_today_default(), key=header_key("date"))
@@ -1736,6 +1753,7 @@ def build_idr_header_form():
     with row1[6]:
         checked_by = st.text_input("Checked by", key=header_key("checked_by"))
 
+    st.markdown("**Measurement and remarks fields**")
     row2 = st.columns([1.0, 1.2, 1.2, 4.0])
     with row2[0]:
         measurement_type = st.selectbox(
@@ -1768,8 +1786,14 @@ def build_idr_header_form():
 def build_idr_rows_form(pay_items):
     st.subheader("IDR Pay Item Table")
     st.caption(
-        "Use this like the Excel table. Item Code and Item Description are searchable dropdowns. "
-        "Selecting either one fills the other and the unit. Quantity color is website-only and will not print on the PDF."
+        "Use this like the Excel item table. The column headers explain each box. "
+        "Item Code and Item Description are searchable dropdowns. Selecting either one fills the other and the unit. "
+        "Quantity status is website-only and will not print on the PDF."
+    )
+    st.info(
+        "Table guide: Item Code # = IDOT pay item number, Fund = fund code if needed, "
+        "Item = pay item description, Location = where work was performed, "
+        "Quantity = amount used today, Unit = auto-filled unit, Status = quantity warning for the website only."
     )
 
     code_options, description_options = get_pay_item_options(pay_items)
@@ -1780,7 +1804,6 @@ def build_idr_rows_form(pay_items):
         .idr-table-header {font-weight: 700; font-size: 0.82rem; padding: 0.25rem 0; border-bottom: 1px solid #d0d0d0;}
         .qty-badge {min-height: 36px; border: 1px solid #999; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.78rem; color: #111; margin-top: 1.70rem;}
         .qty-empty {background: #f4f4f4; color: #777; font-weight: 400;}
-        div[data-testid="stSelectbox"] label, div[data-testid="stTextInput"] label {display: none;}
         </style>
         """,
         unsafe_allow_html=True,
