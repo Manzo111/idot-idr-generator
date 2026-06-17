@@ -1785,17 +1785,6 @@ def build_idr_header_form():
 
 def build_idr_rows_form(pay_items):
     st.subheader("IDR Pay Item Table")
-    st.caption(
-        "Use this like the Excel item table. The column headers explain each box. "
-        "Item Code and Item Description are searchable dropdowns. Selecting either one fills the other and the unit. "
-        "Quantity status is website-only and will not print on the PDF."
-    )
-    st.info(
-        "Table guide: Item Code # = IDOT pay item number, Fund = fund code if needed, "
-        "Item = pay item description, Location = where work was performed, "
-        "Quantity = amount used today, Unit = auto-filled unit, Status = quantity warning for the website only."
-    )
-
     code_options, description_options = get_pay_item_options(pay_items)
 
     st.markdown(
