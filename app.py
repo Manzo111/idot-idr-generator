@@ -1636,177 +1636,337 @@ def get_quantity_status(quantity, plan_quantity):
     }
 
 
-def empty_idr_table_df():
-    return pd.DataFrame([
-        {
-            "item_code": "",
-            "item_description": "",
-            "location": "",
-            "quantity": "",
-            "unit": "",
-        }
-        for _ in range(PDF_ROW_COUNT)
-    ])
+
+def get_pay_item_options(pay_items):
+    """Return dropdown options for item codes and descriptions."""
+    if pay_items is None or pay_items.empty:
+        return [""], [""]
+
+    codes = [""]
+    descriptions = [""]
+
+    for _, row in pay_items.iterrows():
+        code = normalize_pay_item_code(row.get("item_code", ""))
+        desc = clean_line(row.get("item_description", ""))
+
+        if code and code not in codes:
+            codes.append(code)
+        if desc and desc not in descriptions:
+            descriptions.append(desc)
+
+    codes.append("Custom / Manual")
+    descriptions.append("Custom / Manual")
+    return codes, descriptions
 
 
-def resolve_table_row(pay_items, row):
-    by_code = dataframe_records_by_code(pay_items)
-    by_desc = dataframe_records_by_description(pay_items)
+def get_pay_item_by_code(pay_items, code):
+    return dataframe_records_by_code(pay_items).get(normalize_pay_item_code(code))
 
-    typed_code = normalize_pay_item_code(row.get("item_code", ""))
-    typed_desc = clean_line(row.get("item_description", ""))
-    typed_unit = normalize_unit(row.get("unit", ""))
-    location = clean_line(row.get("location", ""))
-    quantity = clean_line(row.get("quantity", ""))
 
-    # Official match by item code wins when the user typed a valid IDOT code.
-    official = by_code.get(typed_code)
+def get_pay_item_by_description(pay_items, description):
+    return dataframe_records_by_description(pay_items).get(clean_line(description))
 
-    # If there is no code match, try exact description match.
-    if official is None and typed_desc:
-        official = by_desc.get(typed_desc)
 
-    if official is not None:
-        resolved = official.copy()
-        resolved["location"] = location
-        resolved["quantity"] = quantity
-        resolved["unit"] = normalize_unit(resolved.get("unit", ""))
-        resolved["is_custom"] = False
-        return resolved
+def row_key(row_index, field):
+    return f"idr_row_{row_index}_{field}"
 
-    # No official match. Keep what the user typed as a custom pay item.
-    return {
-        "item_code": typed_code,
-        "item_description": typed_desc,
-        "unit": typed_unit,
-        "location": location,
-        "quantity": quantity,
+
+def clear_idr_row_state():
+    """Reset the six IDR table rows when a new job is loaded."""
+    for row_index in range(PDF_ROW_COUNT):
+        for field in [
+            "item_code",
+            "item_description",
+            "custom_code",
+            "custom_description",
+            "location",
+            "quantity",
+            "unit",
+            "plan_quantity",
+            "unit_price",
+            "is_custom",
+        ]:
+            st.session_state.pop(row_key(row_index, field), None)
+
+
+def ensure_row_defaults(row_index):
+    defaults = {
+        "item_code": "",
+        "item_description": "",
+        "custom_code": "",
+        "custom_description": "",
+        "location": "",
+        "quantity": "",
+        "unit": "",
         "plan_quantity": "",
         "unit_price": "",
-        "is_custom": bool(typed_code or typed_desc or typed_unit or location or quantity),
+        "is_custom": False,
+    }
+
+    for field, value in defaults.items():
+        st.session_state.setdefault(row_key(row_index, field), value)
+
+
+def set_row_from_official_item(row_index, item):
+    st.session_state[row_key(row_index, "item_code")] = clean_line(item.get("item_code", ""))
+    st.session_state[row_key(row_index, "item_description")] = clean_line(item.get("item_description", ""))
+    st.session_state[row_key(row_index, "unit")] = normalize_unit(item.get("unit", ""))
+    st.session_state[row_key(row_index, "plan_quantity")] = clean_line(item.get("plan_quantity", ""))
+    st.session_state[row_key(row_index, "unit_price")] = clean_line(item.get("unit_price", ""))
+    st.session_state[row_key(row_index, "is_custom")] = False
+
+
+def set_row_as_custom(row_index):
+    st.session_state[row_key(row_index, "item_code")] = "Custom / Manual"
+    st.session_state[row_key(row_index, "item_description")] = "Custom / Manual"
+    st.session_state[row_key(row_index, "unit")] = normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), ""))
+    st.session_state[row_key(row_index, "plan_quantity")] = ""
+    st.session_state[row_key(row_index, "unit_price")] = ""
+    st.session_state[row_key(row_index, "is_custom")] = True
+
+
+def on_item_code_change(row_index, pay_items):
+    code = st.session_state.get(row_key(row_index, "item_code"), "")
+
+    if code == "Custom / Manual":
+        st.session_state[row_key(row_index, "item_description")] = "Custom / Manual"
+        st.session_state[row_key(row_index, "is_custom")] = True
+        st.session_state[row_key(row_index, "plan_quantity")] = ""
+        st.session_state[row_key(row_index, "unit_price")] = ""
+        return
+
+    if not code:
+        st.session_state[row_key(row_index, "item_description")] = ""
+        st.session_state[row_key(row_index, "unit")] = ""
+        st.session_state[row_key(row_index, "plan_quantity")] = ""
+        st.session_state[row_key(row_index, "unit_price")] = ""
+        st.session_state[row_key(row_index, "is_custom")] = False
+        return
+
+    item = get_pay_item_by_code(pay_items, code)
+    if item:
+        set_row_from_official_item(row_index, item)
+
+
+def on_item_description_change(row_index, pay_items):
+    description = st.session_state.get(row_key(row_index, "item_description"), "")
+
+    if description == "Custom / Manual":
+        st.session_state[row_key(row_index, "item_code")] = "Custom / Manual"
+        st.session_state[row_key(row_index, "is_custom")] = True
+        st.session_state[row_key(row_index, "plan_quantity")] = ""
+        st.session_state[row_key(row_index, "unit_price")] = ""
+        return
+
+    if not description:
+        st.session_state[row_key(row_index, "item_code")] = ""
+        st.session_state[row_key(row_index, "unit")] = ""
+        st.session_state[row_key(row_index, "plan_quantity")] = ""
+        st.session_state[row_key(row_index, "unit_price")] = ""
+        st.session_state[row_key(row_index, "is_custom")] = False
+        return
+
+    item = get_pay_item_by_description(pay_items, description)
+    if item:
+        set_row_from_official_item(row_index, item)
+
+
+def on_custom_row_change(row_index):
+    if st.session_state.get(row_key(row_index, "is_custom"), False):
+        st.session_state[row_key(row_index, "unit")] = normalize_unit(
+            st.session_state.get(row_key(row_index, "custom_unit"), "")
+        )
+
+
+def get_row_for_pdf(row_index):
+    is_custom = bool(st.session_state.get(row_key(row_index, "is_custom"), False))
+
+    if is_custom:
+        return {
+            "item_code": normalize_pay_item_code(st.session_state.get(row_key(row_index, "custom_code"), "")),
+            "item_description": clean_line(st.session_state.get(row_key(row_index, "custom_description"), "")),
+            "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
+            "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
+            "unit": normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), "")),
+            "plan_quantity": "",
+            "unit_price": "",
+            "is_custom": True,
+        }
+
+    return {
+        "item_code": clean_line(st.session_state.get(row_key(row_index, "item_code"), "")),
+        "item_description": clean_line(st.session_state.get(row_key(row_index, "item_description"), "")),
+        "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
+        "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
+        "unit": normalize_unit(st.session_state.get(row_key(row_index, "unit"), "")),
+        "plan_quantity": clean_line(st.session_state.get(row_key(row_index, "plan_quantity"), "")),
+        "unit_price": clean_line(st.session_state.get(row_key(row_index, "unit_price"), "")),
+        "is_custom": False,
     }
 
 
-def resolve_table_rows(pay_items, edited_df):
-    rows = []
+def quantity_status_badge_html(quantity, plan_quantity):
+    status = get_quantity_status(quantity, plan_quantity)
+    if not status["status"]:
+        return "<div class='qty-badge qty-empty'>—</div>"
 
-    for _, row in edited_df.head(PDF_ROW_COUNT).iterrows():
-        resolved = resolve_table_row(pay_items, row)
-        status = get_quantity_status(resolved.get("quantity", ""), resolved.get("plan_quantity", ""))
-        resolved["quantity_status"] = status["status"]
-        resolved["quantity_color"] = status["color"]
-        rows.append(resolved)
-
-    while len(rows) < PDF_ROW_COUNT:
-        rows.append(resolve_table_row(pay_items, {}))
-
-    return rows
-
-
-def rows_to_editor_df(rows):
-    data = []
-
-    for row in rows[:PDF_ROW_COUNT]:
-        data.append({
-            "item_code": clean_line(row.get("item_code", "")),
-            "item_description": clean_line(row.get("item_description", "")),
-            "location": clean_line(row.get("location", "")),
-            "quantity": clean_line(row.get("quantity", "")),
-            "unit": clean_line(row.get("unit", "")),
-        })
-
-    while len(data) < PDF_ROW_COUNT:
-        data.append({
-            "item_code": "",
-            "item_description": "",
-            "location": "",
-            "quantity": "",
-            "unit": "",
-        })
-
-    return pd.DataFrame(data)
-
-
-def style_quantity_status(row):
-    color = row.get("quantity_color", "")
-    styles = ["" for _ in row.index]
-
-    if color:
-        for i, column_name in enumerate(row.index):
-            if column_name in ["quantity", "quantity_status"]:
-                styles[i] = f"background-color: {color};"
-
-    return styles
+    color = status["color"]
+    return f"<div class='qty-badge' style='background:{color};'>{status['status']}</div>"
 
 
 def build_idr_rows_form(pay_items):
     st.subheader("IDR Pay Item Rows")
     st.caption(
-        "Edit the six rows like the Excel form. Type an item code or an exact item description; "
-        "the website resolves the matching code, description, and unit before creating the PDF. "
-        "Unmatched rows are treated as custom pay items."
+        "Use the table like the Excel form. The Item Code and Item Description columns are searchable dropdowns. "
+        "Selecting either one fills the other one and the unit automatically. Choose Custom / Manual for non-IDOT items."
     )
 
-    if "idr_table_rows" not in st.session_state:
-        st.session_state.idr_table_rows = empty_idr_table_df()
+    code_options, description_options = get_pay_item_options(pay_items)
 
-    edited_df = st.data_editor(
-        st.session_state.idr_table_rows,
-        num_rows="fixed",
-        hide_index=True,
-        use_container_width=True,
-        key="idr_line_item_table_editor",
-        column_config={
-            "item_code": st.column_config.TextColumn("Item Code", width="small"),
-            "item_description": st.column_config.TextColumn("Item Description", width="large"),
-            "location": st.column_config.TextColumn("Location", width="medium"),
-            "quantity": st.column_config.TextColumn("Quantity", width="small"),
-            "unit": st.column_config.TextColumn("Unit", width="small"),
-        },
-    )
-
-    resolved_rows = resolve_table_rows(pay_items, edited_df)
-    resolved_editor_df = rows_to_editor_df(resolved_rows)
-
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        if st.button("Autofill Table", use_container_width=True):
-            st.session_state.idr_table_rows = resolved_editor_df
-            st.rerun()
-    with c2:
-        st.caption("After typing a code or description, click Autofill Table to push the matched values back into the editable table. The PDF always uses the resolved values shown below.")
-
-    preview_df = pd.DataFrame([
-        {
-            "item_code": row.get("item_code", ""),
-            "item_description": row.get("item_description", ""),
-            "location": row.get("location", ""),
-            "quantity": row.get("quantity", ""),
-            "unit": row.get("unit", ""),
-            "plan_quantity": row.get("plan_quantity", ""),
-            "quantity_status": row.get("quantity_status", ""),
-            "quantity_color": row.get("quantity_color", ""),
+    st.markdown(
+        """
+        <style>
+        .idr-table-header {
+            font-weight: 700;
+            font-size: 0.82rem;
+            padding: 0.25rem 0;
+            border-bottom: 1px solid #d0d0d0;
         }
-        for row in resolved_rows
-    ])
-
-    display_preview_df = preview_df.drop(columns=["quantity_color"])
-    st.dataframe(
-        display_preview_df.style.apply(style_quantity_status, axis=1),
-        hide_index=True,
-        use_container_width=True,
+        .idr-row-box {
+            border-bottom: 1px solid #eeeeee;
+            padding: 0.15rem 0 0.35rem 0;
+        }
+        .qty-badge {
+            min-height: 36px;
+            border: 1px solid #999999;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.78rem;
+            color: #111111;
+            margin-top: 1.70rem;
+        }
+        .qty-empty {
+            background: #f4f4f4;
+            color: #777777;
+            font-weight: 400;
+        }
+        div[data-testid="stSelectbox"] label,
+        div[data-testid="stTextInput"] label {
+            display: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    # The PDF should not include the website-only color/status helper values.
-    pdf_rows = []
-    for row in resolved_rows:
-        clean_row = row.copy()
-        clean_row.pop("quantity_status", None)
-        clean_row.pop("quantity_color", None)
-        pdf_rows.append(clean_row)
+    header_cols = st.columns([1.15, 3.45, 1.65, 1.0, 0.85, 0.95])
+    headers = ["Item Code", "Item Description", "Location", "Quantity", "Unit", "Status"]
+    for col, header in zip(header_cols, headers):
+        col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
-    return pdf_rows
+    rows = []
 
+    for row_index in range(PDF_ROW_COUNT):
+        ensure_row_defaults(row_index)
+
+        row_cols = st.columns([1.15, 3.45, 1.65, 1.0, 0.85, 0.95])
+
+        current_code = st.session_state.get(row_key(row_index, "item_code"), "")
+        current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
+
+        if current_code not in code_options:
+            st.session_state[row_key(row_index, "item_code")] = ""
+        if current_desc not in description_options:
+            st.session_state[row_key(row_index, "item_description")] = ""
+
+        with row_cols[0]:
+            st.selectbox(
+                f"Row {row_index + 1} Item Code",
+                code_options,
+                key=row_key(row_index, "item_code"),
+                on_change=on_item_code_change,
+                args=(row_index, pay_items),
+                label_visibility="collapsed",
+            )
+
+        with row_cols[1]:
+            st.selectbox(
+                f"Row {row_index + 1} Item Description",
+                description_options,
+                key=row_key(row_index, "item_description"),
+                on_change=on_item_description_change,
+                args=(row_index, pay_items),
+                label_visibility="collapsed",
+            )
+
+        is_custom = bool(st.session_state.get(row_key(row_index, "is_custom"), False))
+
+        if is_custom:
+            # Keep custom entry inside the same table row. It only appears after selecting Custom / Manual.
+            with row_cols[0]:
+                st.text_input(
+                    f"Row {row_index + 1} Custom Code",
+                    key=row_key(row_index, "custom_code"),
+                    placeholder="Custom ID",
+                    label_visibility="collapsed",
+                    on_change=on_custom_row_change,
+                    args=(row_index,),
+                )
+            with row_cols[1]:
+                st.text_input(
+                    f"Row {row_index + 1} Custom Description",
+                    key=row_key(row_index, "custom_description"),
+                    placeholder="Custom item description",
+                    label_visibility="collapsed",
+                    on_change=on_custom_row_change,
+                    args=(row_index,),
+                )
+
+        with row_cols[2]:
+            st.text_input(
+                f"Row {row_index + 1} Location",
+                key=row_key(row_index, "location"),
+                label_visibility="collapsed",
+            )
+
+        with row_cols[3]:
+            st.text_input(
+                f"Row {row_index + 1} Quantity",
+                key=row_key(row_index, "quantity"),
+                label_visibility="collapsed",
+            )
+
+        with row_cols[4]:
+            if is_custom:
+                st.text_input(
+                    f"Row {row_index + 1} Unit",
+                    key=row_key(row_index, "custom_unit"),
+                    placeholder="Unit",
+                    label_visibility="collapsed",
+                    on_change=on_custom_row_change,
+                    args=(row_index,),
+                )
+            else:
+                st.text_input(
+                    f"Row {row_index + 1} Unit",
+                    key=row_key(row_index, "unit"),
+                    label_visibility="collapsed",
+                    disabled=True,
+                )
+
+        row = get_row_for_pdf(row_index)
+        rows.append(row)
+
+        with row_cols[5]:
+            st.markdown(
+                quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")),
+                unsafe_allow_html=True,
+            )
+
+    return rows
 
 def wrap_text_to_lines(text, max_chars, max_lines):
     text = clean_line(text)
@@ -2124,6 +2284,7 @@ if st.button("Find IDOT Job"):
         st.session_state.metadata = metadata
         st.session_state.pay_items = pay_items
         st.session_state.match = match
+        clear_idr_row_state()
 
         st.success(
             f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items."
@@ -2238,5 +2399,3 @@ if metadata is not None and not pay_items.empty:
         except Exception as e:
             st.error(f"Could not generate PDF: {e}")
 
-    with st.expander("Preview selected/resolved IDR rows"):
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
