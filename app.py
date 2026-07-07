@@ -42,8 +42,21 @@ JOB_INFO_SHEET_NAME = "IDOT_Job_Info"
 OLD_MATERIALS_SHEET_NAME = "Materials Data"
 
 
-SEARCH_MAX_PAGES_PER_LETTING = 25
+# Lower this if cold searches are still too slow.
+# Set it back to 25 only if you need very deep old letting pages.
+SEARCH_MAX_PAGES_PER_LETTING = 8
 CACHE_TTL_SECONDS = 86400
+
+# Search speed controls.
+REQUEST_TIMEOUT_SECONDS = 12
+RECENT_LETTINGS_FIRST = 8
+PUBLIC_SEARCH_MAX_CANDIDATES = 5
+
+# Public search while building the archive list is the biggest cold-start slowdown.
+# Keep this False for speed. Set True only when you need to find very old lettings
+# that are not directly linked from the IDOT home/archive page.
+RESOLVE_ARCHIVE_DATES_WITH_SEARCH = False
+MAX_ARCHIVE_DATES_TO_RESOLVE = 3
 
 
 CELL_MAP = {
@@ -133,13 +146,13 @@ def make_session():
 
 
 def get_html(session, url):
-    response = session.get(url, timeout=30)
+    response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.text
 
 
 def get_response(session, url):
-    response = session.get(url, timeout=30)
+    response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response
 
@@ -716,7 +729,7 @@ def bing_rss_search(session, query):
 
     response = session.get(
         search_url,
-        timeout=30,
+        timeout=REQUEST_TIMEOUT_SECONDS,
         headers={
             "User-Agent": "Mozilla/5.0 IDR Generator",
             "Accept": "application/rss+xml,application/xml,text/xml,*/*",
@@ -806,54 +819,65 @@ def get_current_letting_link(session, html):
 
 
 def get_all_archive_letting_links_newest_first(session):
+    """
+    Fast version of the current/archive letting list.
+
+    The old version tried to resolve every archive date through Bing when a
+    direct link was not obvious. That made a cold search slow because it could
+    trigger many search-engine requests before the user job number was even
+    checked.
+
+    This version uses direct IDOT links first. If you absolutely need old
+    archive dates that are not directly linked, set
+    RESOLVE_ARCHIVE_DATES_WITH_SEARCH = True near the top of the file.
+    """
     home_html = get_html(session, IDOT_HOME_URL)
 
-    archive_dates = extract_archive_dates_from_home(home_html)
     direct_links = extract_letting_links_from_any_html(home_html)
-
-    archive_links = []
-    seen_urls = set()
-
-    for date_text in archive_dates:
-        found_url = ""
-
-        for link in direct_links:
-            if date_text.lower() in link.get("text", "").lower():
-                found_url = link["url"]
-                break
-
-        if not found_url:
-            found_url = resolve_archive_date_to_letting_url(session, date_text)
-
-        if found_url and found_url not in seen_urls:
-            seen_urls.add(found_url)
-
-            archive_links.append({
-                "text": date_text,
-                "url": found_url,
-                "source": "archive-date-list",
-            })
-
     current = get_current_letting_link(session, home_html)
 
     final_links = []
+    seen_urls = set()
 
     if current and current["url"] not in seen_urls:
         final_links.append(current)
         seen_urls.add(current["url"])
 
-    for link in archive_links:
-        if link["url"] not in seen_urls:
-            final_links.append(link)
-            seen_urls.add(link["url"])
-
+    # Direct links are cheap and usually already ordered newest-to-oldest by IDOT.
     for link in direct_links:
         if link["url"] not in seen_urls:
             final_links.append(link)
             seen_urls.add(link["url"])
 
-    return final_links
+    # Slow optional fallback for archive dates that do not expose direct links.
+    if RESOLVE_ARCHIVE_DATES_WITH_SEARCH:
+        archive_dates = extract_archive_dates_from_home(home_html)
+        resolved_count = 0
 
+        for date_text in archive_dates:
+            if resolved_count >= MAX_ARCHIVE_DATES_TO_RESOLVE:
+                break
+
+            found_url = ""
+
+            for link in direct_links:
+                if date_text.lower() in link.get("text", "").lower():
+                    found_url = link["url"]
+                    break
+
+            if not found_url:
+                found_url = resolve_archive_date_to_letting_url(session, date_text)
+                resolved_count += 1
+
+            if found_url and found_url not in seen_urls:
+                seen_urls.add(found_url)
+                final_links.append({
+                    "text": date_text,
+                    "url": found_url,
+                    "source": "archive-date-search-resolved",
+                })
+
+    return final_links
 
 def get_contract_links_from_letting_page(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -1034,13 +1058,18 @@ def letting_page_matches_contract(session, letting, user_job_number):
 
 
 def find_contract_detail_url_from_public_search(session, user_job_number):
+    """
+    Lightweight public search fallback.
+
+    The previous version ran multiple Bing and DuckDuckGo searches for every
+    uncached job. This version tries Bing first, stops as soon as it gets
+    candidates, and only uses DuckDuckGo if Bing returns nothing.
+    """
     user_job_number = normalize_contract_input(user_job_number)
 
     search_queries = [
+        f'"{user_job_number}" "LbContractDetail/Index" "webapps1.dot.illinois.gov/WCTB"',
         f'site:webapps1.dot.illinois.gov/WCTB/LbContractDetail "{user_job_number}"',
-        f'site:webapps.dot.illinois.gov/WCTB/LbContractDetail "{user_job_number}"',
-        f'"{user_job_number}" "LbContractDetail"',
-        f'"{user_job_number}" "webapps1.dot.illinois.gov/WCTB"',
     ]
 
     candidate_urls = []
@@ -1050,14 +1079,19 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
             text, _ = bing_rss_search(session, query)
             candidate_urls.extend(extract_contract_urls_from_search_text(text))
         except Exception:
-            pass
+            continue
 
+        if candidate_urls:
+            break
+
+    if not candidate_urls:
+        query = search_queries[0]
         duck_url = "https://duckduckgo.com/html/?q=" + quote(query)
 
         try:
             response = session.get(
                 duck_url,
-                timeout=30,
+                timeout=REQUEST_TIMEOUT_SECONDS,
                 headers={
                     "User-Agent": "Mozilla/5.0 IDR Generator",
                     "Accept": "text/html,*/*",
@@ -1067,19 +1101,28 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
 
             candidate_urls.extend(extract_duckduckgo_result_urls(response.text))
             candidate_urls.extend(extract_contract_urls_from_search_text(response.text))
-
         except Exception:
             pass
 
     cleaned_urls = []
+    seen = set()
 
     for url in candidate_urls:
         url = url.replace("&amp;", "&")
         url = url.replace("webapps.dot.illinois.gov", "webapps1.dot.illinois.gov")
         url = url.strip()
 
-        if "LbContractDetail/Index" in url and url not in cleaned_urls:
-            cleaned_urls.append(url)
+        if "LbContractDetail/Index" not in url:
+            continue
+
+        if url in seen:
+            continue
+
+        seen.add(url)
+        cleaned_urls.append(url)
+
+        if len(cleaned_urls) >= PUBLIC_SEARCH_MAX_CANDIDATES:
+            break
 
     for url in cleaned_urls:
         try:
@@ -1101,7 +1144,6 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
             continue
 
     return None
-
 
 def find_contract_detail_url(session, job_number):
     original_input = job_number.strip()
@@ -1129,21 +1171,43 @@ def find_contract_detail_url(session, job_number):
 
     user_job_number = normalize_contract_input(original_input)
 
-    # Fast path 1: public search can often jump straight to the contract detail URL.
-    # Cache it so repeat searches do not hit Bing/DuckDuckGo again.
+    checked_lettings = 0
+    checked_pages = 0
+
+    # Fast path 1: scan recent/current IDOT letting pages first.
+    # This avoids public search-engine calls for the common case.
+    try:
+        letting_links = cached_archive_letting_links_newest_first()
+    except Exception:
+        letting_links = get_all_archive_letting_links_newest_first(session)
+
+    recent_lettings = letting_links[:RECENT_LETTINGS_FIRST]
+
+    for letting in recent_lettings:
+        checked_lettings += 1
+
+        result = letting_page_matches_contract(
+            session=session,
+            letting=letting,
+            user_job_number=user_job_number,
+        )
+
+        if result is not None:
+            return result
+
+    # Fast path 2: lightweight public search fallback.
+    # This is intentionally after recent IDOT pages because public search was
+    # the biggest delay in the old version.
     result = cached_public_contract_search(user_job_number)
 
     if result is not None:
         return result
 
-    # Fast path 2: use a prebuilt hash-table index instead of scanning every
-    # current/archive letting page for every single user search.
-    checked_lettings = 0
-    checked_pages = 0
-
+    # Fast path 3: full cached lookup index. Great when warm, but expensive on
+    # first build, so it runs after cheaper paths fail.
     try:
         lookup_index = cached_contract_lookup_index()
-        checked_lettings = lookup_index.get("checked_lettings", 0)
+        checked_lettings = max(checked_lettings, lookup_index.get("checked_lettings", 0))
         checked_pages = lookup_index.get("checked_pages", 0)
         result = lookup_index.get("contracts", {}).get(user_job_number)
 
@@ -1154,16 +1218,8 @@ def find_contract_detail_url(session, job_number):
         # If the cache/index build fails, fall back to the safer page-by-page scan.
         pass
 
-    # Last fallback: scan letting pages newest-to-oldest. This still uses cached
-    # letting links and cached page parsing where possible.
-    try:
-        letting_links = cached_archive_letting_links_newest_first()
-    except Exception:
-        letting_links = get_all_archive_letting_links_newest_first(session)
-
-    checked_lettings = checked_lettings or 0
-
-    for letting in letting_links:
+    # Final fallback: continue scanning older lettings page-by-page.
+    for letting in letting_links[RECENT_LETTINGS_FIRST:]:
         checked_lettings += 1
 
         result = letting_page_matches_contract(
@@ -1181,7 +1237,6 @@ def find_contract_detail_url(session, job_number):
         f" and {checked_pages} cached letting page(s), newest to oldest. "
         "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
     )
-
 
 # ============================================================
 # PAY ITEM PARSING
@@ -1562,6 +1617,7 @@ def parse_pay_items_from_contract_page_text(html):
     return parse_pay_items_from_any_text(html)
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_idot_job(job_number):
     session = make_session()
 
