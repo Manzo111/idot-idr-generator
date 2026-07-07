@@ -47,13 +47,23 @@ OLD_MATERIALS_SHEET_NAME = "Materials Data"
 
 # Lower this if cold searches are still too slow.
 # Set it back to 25 only if you need very deep old letting pages.
-SEARCH_MAX_PAGES_PER_LETTING = 8
+SEARCH_MAX_PAGES_PER_LETTING = 4
 CACHE_TTL_SECONDS = 86400
 
 # Search speed controls.
-REQUEST_TIMEOUT_SECONDS = 12
-RECENT_LETTINGS_FIRST = 8
-PUBLIC_SEARCH_MAX_CANDIDATES = 5
+# These are intentionally aggressive because live IDOT/archive searching was
+# taking too long inside one Streamlit button click.
+REQUEST_TIMEOUT_SECONDS = 6
+RECENT_LETTINGS_FIRST = 4
+FAST_PAGES_PER_LETTING = 2
+FAST_SEARCH_TIME_BUDGET_SECONDS = 18
+PUBLIC_SEARCH_MAX_CANDIDATES = 2
+
+# Keep these OFF for normal lookup speed. Turning them on makes lookup more
+# exhaustive, but it can make the app feel slow again.
+ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP = False
+ENABLE_FULL_ARCHIVE_ON_FAST_LOOKUP = False
+ENABLE_AUTO_INDEX_BUILD_ON_LOOKUP = False
 
 # Public search while building the archive list is the biggest cold-start slowdown.
 # Keep this False for speed. Set True only when you need to find very old lettings
@@ -65,8 +75,8 @@ MAX_ARCHIVE_DATES_TO_RESOLVE = 3
 # after Streamlit restarts or the cache is cleared.
 CONTRACT_INDEX_DB_PATH = BASE_DIR / "idot_contract_index.sqlite"
 CONTRACT_MISS_TTL_SECONDS = 3600
-RECENT_INDEX_LETTINGS = 8
-RECENT_INDEX_MAX_PAGES_PER_LETTING = 8
+RECENT_INDEX_LETTINGS = 4
+RECENT_INDEX_MAX_PAGES_PER_LETTING = 2
 FULL_INDEX_MAX_PAGES_PER_LETTING = SEARCH_MAX_PAGES_PER_LETTING
 INDEX_MAX_WORKERS = 8
 RECENT_INDEX_TTL_SECONDS = 6 * 3600
@@ -1361,16 +1371,12 @@ def ensure_full_sqlite_contract_index(letting_links):
     )
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Building in-memory contract lookup index...")
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def cached_contract_lookup_index():
     """
-    Kept as a backup to the SQLite index.
-    SQLite is the main speed improvement because it survives Streamlit restarts.
+    Read the SQLite index into memory without building/refreshing it.
+    Building the full archive index inside lookup is intentionally disabled.
     """
-    letting_links = cached_archive_letting_links_newest_first()
-
-    ensure_full_sqlite_contract_index(letting_links)
-
     contract_index = {}
     checked_lettings = 0
     checked_pages = 0
@@ -1409,10 +1415,28 @@ def cached_public_contract_search(user_job_number):
     return find_contract_detail_url_from_public_search(cached_session, user_job_number)
 
 
-def letting_page_matches_contract(session, letting, user_job_number):
-    seen_page_signatures = set()
 
-    for page_num in range(1, SEARCH_MAX_PAGES_PER_LETTING + 1):
+def search_time_exceeded(start_time):
+    if start_time is None:
+        return False
+    return (time.time() - start_time) >= FAST_SEARCH_TIME_BUDGET_SECONDS
+
+
+def letting_page_matches_contract(session, letting, user_job_number, max_pages=None, start_time=None):
+    """
+    Fast direct IDOT page scan.
+
+    Important: this does NOT walk every archive page by default. It scans only a
+    small number of pages for each recent letting, saves anything it sees into
+    SQLite, and returns as soon as it finds the requested contract.
+    """
+    seen_page_signatures = set()
+    max_pages = max_pages or FAST_PAGES_PER_LETTING
+
+    for page_num in range(1, max_pages + 1):
+        if search_time_exceeded(start_time):
+            break
+
         if page_num == 1:
             page_url = letting["url"]
         else:
@@ -1440,14 +1464,14 @@ def letting_page_matches_contract(session, letting, user_job_number):
             letting=letting,
             page_num=page_num,
             contract_links=contract_links,
-            source_suffix="visited-page",
+            source_suffix="fast-visited-page",
         )
 
         for contract in contract_links:
             label = contract.get("label", "")
 
             if contract_matches(user_job_number, label):
-                result = make_contract_result(contract, letting, page_num, source_suffix="cached-page")
+                result = make_contract_result(contract, letting, page_num, source_suffix="fast-page")
                 sqlite_save_contract_result(label, result)
                 return result
 
@@ -1456,49 +1480,21 @@ def letting_page_matches_contract(session, letting, user_job_number):
 
 def find_contract_detail_url_from_public_search(session, user_job_number):
     """
-    Lightweight public search fallback.
+    Very small public-search fallback.
 
-    This is intentionally not part of the normal fast path. It is only used
-    after local SQLite/recent IDOT lookup fails.
+    This is disabled by default through ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP
+    because search engines were one of the biggest reasons the lookup felt slow.
     """
     user_job_number = normalize_contract_input(user_job_number)
 
-    search_queries = [
-        f'"{user_job_number}" "LbContractDetail/Index" "webapps1.dot.illinois.gov/WCTB"',
-        f'site:webapps1.dot.illinois.gov/WCTB/LbContractDetail "{user_job_number}"',
-    ]
-
+    search_query = f'"{user_job_number}" "LbContractDetail/Index" "webapps1.dot.illinois.gov/WCTB"'
     candidate_urls = []
 
-    for query in search_queries:
-        try:
-            text, _ = bing_rss_search(session, query)
-            candidate_urls.extend(extract_contract_urls_from_search_text(text))
-        except Exception:
-            continue
-
-        if candidate_urls:
-            break
-
-    if not candidate_urls:
-        query = search_queries[0]
-        duck_url = "https://duckduckgo.com/html/?q=" + quote(query)
-
-        try:
-            response = session.get(
-                duck_url,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                headers={
-                    "User-Agent": "Mozilla/5.0 IDR Generator",
-                    "Accept": "text/html,*/*",
-                },
-            )
-            response.raise_for_status()
-
-            candidate_urls.extend(extract_duckduckgo_result_urls(response.text))
-            candidate_urls.extend(extract_contract_urls_from_search_text(response.text))
-        except Exception:
-            pass
+    try:
+        text, _ = bing_rss_search(session, search_query)
+        candidate_urls.extend(extract_contract_urls_from_search_text(text))
+    except Exception:
+        candidate_urls = []
 
     cleaned_urls = []
     seen = set()
@@ -1533,7 +1529,7 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
                     "letting": metadata.get("letting_date", "Found by public contract search"),
                     "letting_url": "",
                     "page": "",
-                    "source": "public-contract-search",
+                    "source": "public-contract-search-fast",
                 }
                 sqlite_save_contract_result(label, result)
                 return result
@@ -1545,6 +1541,19 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
 
 
 def find_contract_detail_url(session, job_number):
+    """
+    Fast lookup path.
+
+    Order:
+    1. Direct contract URL, if pasted.
+    2. Local SQLite lookup.
+    3. Small recent/current IDOT page scan.
+    4. Optional tiny public search, off by default.
+    5. Optional full archive/index search, off by default.
+
+    The point is to stop the app from hanging during a normal job lookup.
+    """
+    start_time = time.time()
     original_input = job_number.strip()
 
     if not original_input:
@@ -1572,8 +1581,8 @@ def find_contract_detail_url(session, job_number):
 
     user_job_number = normalize_contract_input(original_input)
 
-    # Fast path 1: local persistent lookup. This is instant after a contract
-    # has been found once or after the automatic index has been built.
+    # Fastest path: local persistent lookup. This should be instant after a job
+    # has been found once or if the SQLite index already has it.
     result = sqlite_lookup_contract(user_job_number)
     if result is not None:
         return result
@@ -1593,71 +1602,74 @@ def find_contract_detail_url(session, job_number):
     except Exception:
         letting_links = get_all_archive_letting_links_newest_first(session)
 
-    # Fast path 2: automatically build/update only the recent-current index.
-    # No extra UI input is needed; this uses the same job lookup box.
-    try:
-        recent_stats = ensure_recent_sqlite_contract_index(letting_links)
-        checked_lettings += int(recent_stats.get("checked_lettings", 0) or 0)
-        checked_pages += int(recent_stats.get("checked_pages", 0) or 0)
-    except Exception:
-        pass
+    # Do not build a 64-page or full archive index inside the lookup click.
+    # Just scan a small recent window and save anything seen into SQLite.
+    recent_lettings = letting_links[:RECENT_LETTINGS_FIRST]
 
-    result = sqlite_lookup_contract(user_job_number)
-    if result is not None:
-        return result
+    for letting in recent_lettings:
+        if search_time_exceeded(start_time):
+            break
 
-    # Fast path 3: direct recent page scan as a safety net. This also writes
-    # whatever it sees into SQLite, making later searches faster.
-    for letting in letting_links[:RECENT_LETTINGS_FIRST]:
         checked_lettings += 1
+        before = time.time()
 
         result = letting_page_matches_contract(
             session=session,
             letting=letting,
             user_job_number=user_job_number,
+            max_pages=FAST_PAGES_PER_LETTING,
+            start_time=start_time,
         )
+
+        checked_pages += FAST_PAGES_PER_LETTING
 
         if result is not None:
             return result
 
-    # Fallback 1: lightweight public search. This is no longer the normal path.
-    result = cached_public_contract_search(user_job_number)
-    if result is not None:
-        return result
+        # If IDOT is slow for a single letting, do not keep piling on requests.
+        if time.time() - before > REQUEST_TIMEOUT_SECONDS + 2:
+            break
 
-    # Fallback 2: full persistent SQLite index. Expensive the first time, but
-    # all future searches become local database lookups.
-    try:
-        full_stats = ensure_full_sqlite_contract_index(letting_links)
-        checked_lettings += int(full_stats.get("checked_lettings", 0) or 0)
-        checked_pages += int(full_stats.get("checked_pages", 0) or 0)
-    except Exception:
-        pass
-
+    # Re-check SQLite because the recent page scan writes all seen contracts.
     result = sqlite_lookup_contract(user_job_number)
     if result is not None:
         return result
 
-    # Final fallback: old-style scan over older lettings. Usually this will not
-    # be reached because the full SQLite index above should cover the same data.
-    for letting in letting_links[RECENT_LETTINGS_FIRST:]:
-        checked_lettings += 1
-
-        result = letting_page_matches_contract(
-            session=session,
-            letting=letting,
-            user_job_number=user_job_number,
-        )
-
+    # Optional tiny public search. Off by default for speed.
+    if ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP and not search_time_exceeded(start_time):
+        result = cached_public_contract_search(user_job_number)
         if result is not None:
             return result
+
+    # Optional exhaustive archive search. Off by default because this is exactly
+    # what was making lookup too slow.
+    if ENABLE_FULL_ARCHIVE_ON_FAST_LOOKUP and not search_time_exceeded(start_time):
+        for letting in letting_links[RECENT_LETTINGS_FIRST:]:
+            if search_time_exceeded(start_time):
+                break
+
+            checked_lettings += 1
+
+            result = letting_page_matches_contract(
+                session=session,
+                letting=letting,
+                user_job_number=user_job_number,
+                max_pages=1,
+                start_time=start_time,
+            )
+
+            checked_pages += 1
+
+            if result is not None:
+                return result
 
     sqlite_record_miss(user_job_number)
 
     raise ValueError(
-        f"Could not find contract '{user_job_number}'. "
-        f"I checked {checked_lettings} current/archive letting page(s)"
-        f" and {checked_pages} indexed letting page(s), newest to oldest. "
+        f"Could not find contract '{user_job_number}' quickly. "
+        f"Fast lookup checked {checked_lettings} recent/current letting page group(s) "
+        f"and about {checked_pages} page(s). "
+        "I stopped before running the slow full archive search. "
         "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
     )
 
@@ -1972,7 +1984,21 @@ def find_table_inside_raw_excel(raw_df):
 
 
 def parse_pay_items_from_excel_bytes(content):
-    for engine in [None, "openpyxl", "xlrd"]:
+    """
+    Parse the Pay Item Excel file with the least retry work possible.
+
+    The old version tried multiple engines and repeatedly reread the same file,
+    which made the app feel like search was still running even after the
+    contract page had already been found.
+    """
+    engines = ["openpyxl", None]
+
+    # Old .xls files need xlrd. Only try it if the file magic looks like an old
+    # OLE compound document; otherwise this retry is wasted time.
+    if content[:8].startswith(b"\xd0\xcf\x11\xe0"):
+        engines.append("xlrd")
+
+    for engine in engines:
         try:
             file_data = io.BytesIO(content)
 
@@ -2015,6 +2041,23 @@ def parse_pay_items_from_any_text(text):
     return pd.DataFrame()
 
 
+def looks_like_excel_response(response, content):
+    content_type = clean_line(response.headers.get("Content-Type", "")).lower()
+    content_disposition = clean_line(response.headers.get("Content-Disposition", "")).lower()
+
+    if "excel" in content_type or "spreadsheet" in content_type:
+        return True
+
+    if ".xlsx" in content_disposition or ".xls" in content_disposition:
+        return True
+
+    # .xlsx zip magic or old .xls OLE magic.
+    if content.startswith(b"PK") or content[:8].startswith(b"\xd0\xcf\x11\xe0"):
+        return True
+
+    return False
+
+
 def parse_pay_items_from_pay_item_report(session, contract_url, html):
     pay_item_url = get_pay_item_report_url(contract_url, html)
 
@@ -2026,6 +2069,14 @@ def parse_pay_items_from_pay_item_report(session, contract_url, html):
 
     if not content:
         return pd.DataFrame()
+
+    # IDOT's Pay Item Report is usually an Excel export. Trying text parsers
+    # first wastes time on binary Excel bytes, so detect Excel and parse it first.
+    if looks_like_excel_response(response, content):
+        pay_items = parse_pay_items_from_excel_bytes(content)
+
+        if not pay_items.empty:
+            return pay_items
 
     text = decode_content(content)
     pay_items = parse_pay_items_from_any_text(text)
@@ -3002,7 +3053,7 @@ if "match" not in st.session_state:
 
 if st.button("Find IDOT Job"):
     try:
-        with st.spinner("Searching local IDOT index first, then IDOT archives if needed..."):
+        with st.spinner("Fast lookup: checking local index and recent IDOT letting pages..."):
             metadata, pay_items, match = fetch_idot_job(job_number)
         st.session_state.metadata = metadata
         st.session_state.pay_items = pay_items
