@@ -1,5 +1,8 @@
 import io
 import re
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import copy
 from pathlib import Path
 from urllib.parse import (
@@ -57,6 +60,17 @@ PUBLIC_SEARCH_MAX_CANDIDATES = 5
 # that are not directly linked from the IDOT home/archive page.
 RESOLVE_ARCHIVE_DATES_WITH_SEARCH = False
 MAX_ARCHIVE_DATES_TO_RESOLVE = 3
+
+# Persistent contract lookup database. This makes repeat searches instant even
+# after Streamlit restarts or the cache is cleared.
+CONTRACT_INDEX_DB_PATH = BASE_DIR / "idot_contract_index.sqlite"
+CONTRACT_MISS_TTL_SECONDS = 3600
+RECENT_INDEX_LETTINGS = 8
+RECENT_INDEX_MAX_PAGES_PER_LETTING = 8
+FULL_INDEX_MAX_PAGES_PER_LETTING = SEARCH_MAX_PAGES_PER_LETTING
+INDEX_MAX_WORKERS = 8
+RECENT_INDEX_TTL_SECONDS = 6 * 3600
+FULL_INDEX_TTL_SECONDS = CACHE_TTL_SECONDS
 
 
 CELL_MAP = {
@@ -143,6 +157,14 @@ def make_session():
     session = requests.Session()
     session.headers.update(get_headers())
     return session
+
+
+def make_soup(markup):
+    """Use lxml when installed, but keep working if Streamlit lacks it."""
+    try:
+        return BeautifulSoup(markup, "lxml")
+    except Exception:
+        return BeautifulSoup(markup, "html.parser")
 
 
 def get_html(session, url):
@@ -429,7 +451,7 @@ def parse_county_route_from_flat_text(flat_text, metadata):
 
 
 def parse_metadata_from_contract_page(html, contract_url):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
 
     lines = [clean_line(x) for x in soup.stripped_strings if clean_line(x)]
     flat_text = clean_line(soup.get_text(" "))
@@ -545,7 +567,7 @@ def get_page_signature(contract_links):
 
 
 def extract_archive_dates_from_home(html):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
     text = clean_line(soup.get_text(" "))
 
     start = text.find("Transportation Bulletin Archives")
@@ -602,7 +624,7 @@ def extract_letting_links_from_any_html(html):
             "source": "raw-html-relative",
         })
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
 
     for tag in soup.find_all(True):
         visible_text = clean_line(tag.get_text(" "))
@@ -741,7 +763,7 @@ def bing_rss_search(session, query):
 
 
 def extract_duckduckgo_result_urls(html):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
     urls = []
 
     for a in soup.find_all("a", href=True):
@@ -793,7 +815,7 @@ def resolve_archive_date_to_letting_url(session, date_text):
             for url in letting_urls:
                 try:
                     html = get_html(session, url)
-                    page_text = clean_line(BeautifulSoup(html, "html.parser").get_text(" "))
+                    page_text = clean_line(make_soup(html).get_text(" "))
 
                     if date_text.lower() in page_text.lower():
                         return url
@@ -880,7 +902,7 @@ def get_all_archive_letting_links_newest_first(session):
     return final_links
 
 def get_contract_links_from_letting_page(html):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
 
     contract_links = []
 
@@ -965,32 +987,330 @@ def add_contract_to_index(contract_index, label, result):
             contract_index.setdefault(suffix, result)
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Building contract lookup index...")
-def cached_contract_lookup_index():
-    """
-    Build a hash-table style lookup index:
-        contract number/suffix -> contract detail result
 
-    The first run still has to walk IDOT letting pages, but later searches use
-    direct dictionary lookup instead of scanning every page again.
+# ============================================================
+# PERSISTENT CONTRACT LOOKUP INDEX
+# ============================================================
+
+def get_contract_db_connection():
+    """Create the local SQLite index database if needed and return a connection."""
+    conn = sqlite3.connect(CONTRACT_INDEX_DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contracts (
+            contract_key TEXT PRIMARY KEY,
+            label TEXT,
+            url TEXT NOT NULL,
+            letting TEXT,
+            letting_url TEXT,
+            page TEXT,
+            source TEXT,
+            updated_at REAL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contract_misses (
+            query TEXT PRIMARY KEY,
+            updated_at REAL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at REAL
+        )
+        """
+    )
+
+    conn.commit()
+    return conn
+
+
+def sqlite_lookup_contract(user_job_number):
+    query = normalize_contract_input(user_job_number)
+
+    if not query:
+        return None
+
+    try:
+        with get_contract_db_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT label, url, letting, letting_url, page, source
+                FROM contracts
+                WHERE contract_key = ?
+                LIMIT 1
+                """,
+                (query,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "label": clean_line(row["label"]),
+            "url": clean_line(row["url"]),
+            "letting": clean_line(row["letting"]),
+            "letting_url": clean_line(row["letting_url"]),
+            "page": clean_line(row["page"]),
+            "source": clean_line(row["source"] or "sqlite-index"),
+        }
+    except Exception:
+        return None
+
+
+def sqlite_delete_contract_url(url):
+    url = clean_line(url)
+    if not url:
+        return
+    try:
+        with get_contract_db_connection() as conn:
+            conn.execute("DELETE FROM contracts WHERE url = ?", (url,))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def sqlite_save_contract_result(label, result, source_suffix=""):
+    normalized_label = normalize_contract_input(label or result.get("label", ""))
+    url = clean_line(result.get("url", ""))
+
+    if not normalized_label or not url:
+        return
+
+    source = clean_line(result.get("source", ""))
+    if source_suffix:
+        source = f"{source}-{source_suffix}" if source else source_suffix
+
+    keys = [normalized_label]
+    if "-" in normalized_label:
+        suffix = normalized_label.split("-")[-1]
+        if suffix and suffix not in keys:
+            keys.append(suffix)
+
+    now = time.time()
+
+    try:
+        with get_contract_db_connection() as conn:
+            for contract_key in keys:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO contracts
+                    (contract_key, label, url, letting, letting_url, page, source, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        contract_key,
+                        normalized_label,
+                        url,
+                        clean_line(result.get("letting", "")),
+                        clean_line(result.get("letting_url", "")),
+                        str(result.get("page", "")),
+                        source,
+                        now,
+                    ),
+                )
+
+            # A successful find means this query should no longer be treated as a miss.
+            conn.execute("DELETE FROM contract_misses WHERE query IN ({})".format(
+                ",".join(["?"] * len(keys))
+            ), keys)
+            conn.commit()
+    except Exception:
+        pass
+
+
+def sqlite_save_contract_links(letting, page_num, contract_links, source_suffix="sqlite-index"):
+    saved_count = 0
+
+    for contract in contract_links:
+        label = contract.get("label", "")
+        if not normalize_contract_input(label):
+            continue
+
+        result = make_contract_result(contract, letting, page_num, source_suffix=source_suffix)
+        sqlite_save_contract_result(label, result)
+        saved_count += 1
+
+    return saved_count
+
+
+def sqlite_is_recent_miss(user_job_number):
+    query = normalize_contract_input(user_job_number)
+
+    if not query:
+        return False
+
+    try:
+        with get_contract_db_connection() as conn:
+            row = conn.execute(
+                "SELECT updated_at FROM contract_misses WHERE query = ? LIMIT 1",
+                (query,),
+            ).fetchone()
+
+        if row is None:
+            return False
+
+        return (time.time() - float(row["updated_at"])) < CONTRACT_MISS_TTL_SECONDS
+    except Exception:
+        return False
+
+
+def sqlite_record_miss(user_job_number):
+    query = normalize_contract_input(user_job_number)
+
+    if not query:
+        return
+
+    try:
+        with get_contract_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO contract_misses (query, updated_at)
+                VALUES (?, ?)
+                """,
+                (query, time.time()),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def sqlite_get_meta(key):
+    try:
+        with get_contract_db_connection() as conn:
+            row = conn.execute(
+                "SELECT value, updated_at FROM index_meta WHERE key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+
+        if row is None:
+            return "", 0.0
+
+        return clean_line(row["value"]), float(row["updated_at"] or 0)
+    except Exception:
+        return "", 0.0
+
+
+def sqlite_set_meta(key, value):
+    try:
+        with get_contract_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO index_meta (key, value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (key, str(value), time.time()),
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def make_letting_signature(letting_links):
+    pieces = []
+    for letting in letting_links:
+        pieces.append(clean_line(letting.get("text", "")) + "|" + clean_line(letting.get("url", "")))
+    return "||".join(pieces)
+
+
+def fetch_contract_links_for_index(page_url):
+    """Thread worker: fetch and parse one IDOT letting page."""
+    try:
+        session = make_session()
+        html = get_html(session, page_url)
+        return get_contract_links_from_letting_page(html)
+    except Exception:
+        return []
+
+
+def build_sqlite_contract_index_for_lettings(
+    letting_links,
+    max_pages_per_letting,
+    meta_key="",
+    meta_ttl_seconds=0,
+    force=False,
+    source_suffix="sqlite-index",
+):
     """
-    letting_links = cached_archive_letting_links_newest_first()
-    contract_index = {}
-    checked_lettings = 0
-    checked_pages = 0
+    Build/update the persistent SQLite index.
+
+    This keeps the app UI unchanged: the user still only enters the job number.
+    The indexing is automatic and stored in idot_contract_index.sqlite.
+    """
+    if not letting_links:
+        return {"checked_lettings": 0, "checked_pages": 0, "saved_contracts": 0}
+
+    signature = make_letting_signature(letting_links)
+
+    if meta_key and not force:
+        saved_signature, updated_at = sqlite_get_meta(meta_key)
+        if saved_signature == signature and (time.time() - updated_at) < meta_ttl_seconds:
+            return {"checked_lettings": 0, "checked_pages": 0, "saved_contracts": 0, "skipped": True}
+
+    page_jobs = []
 
     for letting in letting_links:
+        letting_url = letting.get("url", "")
+        if not letting_url:
+            continue
+
+        for page_num in range(1, max_pages_per_letting + 1):
+            page_url = letting_url if page_num == 1 else set_query_param(letting_url, "page", page_num)
+            page_jobs.append((letting, page_num, page_url))
+
+    page_results = []
+
+    workers = max(1, min(INDEX_MAX_WORKERS, len(page_jobs)))
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(fetch_contract_links_for_index, page_url): (letting, page_num, page_url)
+            for letting, page_num, page_url in page_jobs
+        }
+
+        for future in as_completed(future_map):
+            letting, page_num, page_url = future_map[future]
+            try:
+                contract_links = future.result()
+            except Exception:
+                contract_links = []
+            page_results.append((letting, page_num, page_url, contract_links))
+
+    # Process pages in natural order per letting so duplicate/empty page detection still works.
+    grouped = {}
+    letting_order = []
+
+    for letting, page_num, page_url, contract_links in page_results:
+        letting_url = letting.get("url", "")
+        if letting_url not in grouped:
+            grouped[letting_url] = []
+            letting_order.append(letting_url)
+        grouped[letting_url].append((page_num, letting, page_url, contract_links))
+
+    checked_lettings = 0
+    checked_pages = 0
+    saved_contracts = 0
+
+    for letting_url in letting_order:
         checked_lettings += 1
         seen_page_signatures = set()
 
-        for page_num in range(1, SEARCH_MAX_PAGES_PER_LETTING + 1):
-            page_url = letting["url"] if page_num == 1 else set_query_param(letting["url"], "page", page_num)
-
-            try:
-                contract_links = cached_contract_links_for_page(page_url)
-            except Exception:
-                break
-
+        for page_num, letting, page_url, contract_links in sorted(grouped[letting_url], key=lambda x: x[0]):
             if not contract_links:
                 break
 
@@ -1001,11 +1321,80 @@ def cached_contract_lookup_index():
 
             seen_page_signatures.add(page_signature)
             checked_pages += 1
+            saved_contracts += sqlite_save_contract_links(
+                letting=letting,
+                page_num=page_num,
+                contract_links=contract_links,
+                source_suffix=source_suffix,
+            )
 
-            for contract in contract_links:
-                label = contract.get("label", "")
-                result = make_contract_result(contract, letting, page_num, source_suffix="cached-index")
-                add_contract_to_index(contract_index, label, result)
+    if meta_key:
+        sqlite_set_meta(meta_key, signature)
+
+    return {
+        "checked_lettings": checked_lettings,
+        "checked_pages": checked_pages,
+        "saved_contracts": saved_contracts,
+    }
+
+
+def ensure_recent_sqlite_contract_index(letting_links):
+    recent_lettings = letting_links[:RECENT_INDEX_LETTINGS]
+    return build_sqlite_contract_index_for_lettings(
+        recent_lettings,
+        max_pages_per_letting=RECENT_INDEX_MAX_PAGES_PER_LETTING,
+        meta_key="recent_contract_index",
+        meta_ttl_seconds=RECENT_INDEX_TTL_SECONDS,
+        force=False,
+        source_suffix="sqlite-recent-index",
+    )
+
+
+def ensure_full_sqlite_contract_index(letting_links):
+    return build_sqlite_contract_index_for_lettings(
+        letting_links,
+        max_pages_per_letting=FULL_INDEX_MAX_PAGES_PER_LETTING,
+        meta_key="full_contract_index",
+        meta_ttl_seconds=FULL_INDEX_TTL_SECONDS,
+        force=False,
+        source_suffix="sqlite-full-index",
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Building in-memory contract lookup index...")
+def cached_contract_lookup_index():
+    """
+    Kept as a backup to the SQLite index.
+    SQLite is the main speed improvement because it survives Streamlit restarts.
+    """
+    letting_links = cached_archive_letting_links_newest_first()
+
+    ensure_full_sqlite_contract_index(letting_links)
+
+    contract_index = {}
+    checked_lettings = 0
+    checked_pages = 0
+
+    try:
+        with get_contract_db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT contract_key, label, url, letting, letting_url, page, source
+                FROM contracts
+                """
+            ).fetchall()
+
+        for row in rows:
+            contract_index[row["contract_key"]] = {
+                "label": clean_line(row["label"]),
+                "url": clean_line(row["url"]),
+                "letting": clean_line(row["letting"]),
+                "letting_url": clean_line(row["letting_url"]),
+                "page": clean_line(row["page"]),
+                "source": clean_line(row["source"] or "sqlite-index"),
+            }
+    except Exception:
+        pass
 
     return {
         "contracts": contract_index,
@@ -1047,12 +1436,20 @@ def letting_page_matches_contract(session, letting, user_job_number):
             break
 
         seen_page_signatures.add(page_signature)
+        sqlite_save_contract_links(
+            letting=letting,
+            page_num=page_num,
+            contract_links=contract_links,
+            source_suffix="visited-page",
+        )
 
         for contract in contract_links:
             label = contract.get("label", "")
 
             if contract_matches(user_job_number, label):
-                return make_contract_result(contract, letting, page_num, source_suffix="cached-page")
+                result = make_contract_result(contract, letting, page_num, source_suffix="cached-page")
+                sqlite_save_contract_result(label, result)
+                return result
 
     return None
 
@@ -1061,9 +1458,8 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
     """
     Lightweight public search fallback.
 
-    The previous version ran multiple Bing and DuckDuckGo searches for every
-    uncached job. This version tries Bing first, stops as soon as it gets
-    candidates, and only uses DuckDuckGo if Bing returns nothing.
+    This is intentionally not part of the normal fast path. It is only used
+    after local SQLite/recent IDOT lookup fails.
     """
     user_job_number = normalize_contract_input(user_job_number)
 
@@ -1131,7 +1527,7 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
             label = metadata.get("item_contract", "")
 
             if contract_matches(user_job_number, label):
-                return {
+                result = {
                     "label": label,
                     "url": url,
                     "letting": metadata.get("letting_date", "Found by public contract search"),
@@ -1139,11 +1535,14 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
                     "page": "",
                     "source": "public-contract-search",
                 }
+                sqlite_save_contract_result(label, result)
+                return result
 
         except Exception:
             continue
 
     return None
+
 
 def find_contract_detail_url(session, job_number):
     original_input = job_number.strip()
@@ -1160,7 +1559,7 @@ def find_contract_detail_url(session, job_number):
                 "The direct URL opened, but the contract number could not be parsed from that page."
             )
 
-        return {
+        result = {
             "label": metadata.get("item_contract", ""),
             "url": original_input,
             "letting": metadata.get("letting_date", "Direct URL"),
@@ -1168,22 +1567,48 @@ def find_contract_detail_url(session, job_number):
             "page": "",
             "source": "direct-url",
         }
+        sqlite_save_contract_result(result["label"], result)
+        return result
 
     user_job_number = normalize_contract_input(original_input)
+
+    # Fast path 1: local persistent lookup. This is instant after a contract
+    # has been found once or after the automatic index has been built.
+    result = sqlite_lookup_contract(user_job_number)
+    if result is not None:
+        return result
+
+    # Avoid repeating known bad searches for a short time.
+    if sqlite_is_recent_miss(user_job_number):
+        raise ValueError(
+            f"Could not find contract '{user_job_number}'. This job number was already searched recently. "
+            "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
+        )
 
     checked_lettings = 0
     checked_pages = 0
 
-    # Fast path 1: scan recent/current IDOT letting pages first.
-    # This avoids public search-engine calls for the common case.
     try:
         letting_links = cached_archive_letting_links_newest_first()
     except Exception:
         letting_links = get_all_archive_letting_links_newest_first(session)
 
-    recent_lettings = letting_links[:RECENT_LETTINGS_FIRST]
+    # Fast path 2: automatically build/update only the recent-current index.
+    # No extra UI input is needed; this uses the same job lookup box.
+    try:
+        recent_stats = ensure_recent_sqlite_contract_index(letting_links)
+        checked_lettings += int(recent_stats.get("checked_lettings", 0) or 0)
+        checked_pages += int(recent_stats.get("checked_pages", 0) or 0)
+    except Exception:
+        pass
 
-    for letting in recent_lettings:
+    result = sqlite_lookup_contract(user_job_number)
+    if result is not None:
+        return result
+
+    # Fast path 3: direct recent page scan as a safety net. This also writes
+    # whatever it sees into SQLite, making later searches faster.
+    for letting in letting_links[:RECENT_LETTINGS_FIRST]:
         checked_lettings += 1
 
         result = letting_page_matches_contract(
@@ -1195,30 +1620,26 @@ def find_contract_detail_url(session, job_number):
         if result is not None:
             return result
 
-    # Fast path 2: lightweight public search fallback.
-    # This is intentionally after recent IDOT pages because public search was
-    # the biggest delay in the old version.
+    # Fallback 1: lightweight public search. This is no longer the normal path.
     result = cached_public_contract_search(user_job_number)
-
     if result is not None:
         return result
 
-    # Fast path 3: full cached lookup index. Great when warm, but expensive on
-    # first build, so it runs after cheaper paths fail.
+    # Fallback 2: full persistent SQLite index. Expensive the first time, but
+    # all future searches become local database lookups.
     try:
-        lookup_index = cached_contract_lookup_index()
-        checked_lettings = max(checked_lettings, lookup_index.get("checked_lettings", 0))
-        checked_pages = lookup_index.get("checked_pages", 0)
-        result = lookup_index.get("contracts", {}).get(user_job_number)
-
-        if result is not None:
-            return result
-
+        full_stats = ensure_full_sqlite_contract_index(letting_links)
+        checked_lettings += int(full_stats.get("checked_lettings", 0) or 0)
+        checked_pages += int(full_stats.get("checked_pages", 0) or 0)
     except Exception:
-        # If the cache/index build fails, fall back to the safer page-by-page scan.
         pass
 
-    # Final fallback: continue scanning older lettings page-by-page.
+    result = sqlite_lookup_contract(user_job_number)
+    if result is not None:
+        return result
+
+    # Final fallback: old-style scan over older lettings. Usually this will not
+    # be reached because the full SQLite index above should cover the same data.
     for letting in letting_links[RECENT_LETTINGS_FIRST:]:
         checked_lettings += 1
 
@@ -1231,10 +1652,12 @@ def find_contract_detail_url(session, job_number):
         if result is not None:
             return result
 
+    sqlite_record_miss(user_job_number)
+
     raise ValueError(
         f"Could not find contract '{user_job_number}'. "
         f"I checked {checked_lettings} current/archive letting page(s)"
-        f" and {checked_pages} cached letting page(s), newest to oldest. "
+        f" and {checked_pages} indexed letting page(s), newest to oldest. "
         "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
     )
 
@@ -1265,7 +1688,7 @@ def normalize_pay_item_code(value):
 
 
 def get_pay_item_report_url(contract_url, html):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = make_soup(html)
 
     for a in soup.find_all("a", href=True):
         text = clean_line(a.get_text(" ")).lower()
@@ -1356,7 +1779,7 @@ def parse_pay_items_from_html_tables(text):
 
 
 def parse_pay_items_from_row_tokens(text):
-    soup = BeautifulSoup(text, "html.parser")
+    soup = make_soup(text)
     lines = [clean_line(x) for x in soup.get_text("\n").splitlines() if clean_line(x)]
 
     rows = []
@@ -1465,7 +1888,7 @@ def parse_pay_item_row_strings(row_strings):
 
 
 def parse_pay_items_from_flat_text(text):
-    soup = BeautifulSoup(text, "html.parser")
+    soup = make_soup(text)
     visible_text = soup.get_text(" ")
 
     visible_text = visible_text.replace("\u00a0", " ")
@@ -2579,7 +3002,7 @@ if "match" not in st.session_state:
 
 if st.button("Find IDOT Job"):
     try:
-        with st.spinner("Searching IDOT Transportation Bulletin archives newest to oldest..."):
+        with st.spinner("Searching local IDOT index first, then IDOT archives if needed..."):
             metadata, pay_items, match = fetch_idot_job(job_number)
         st.session_state.metadata = metadata
         st.session_state.pay_items = pay_items
