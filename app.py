@@ -45,40 +45,39 @@ JOB_INFO_SHEET_NAME = "IDOT_Job_Info"
 OLD_MATERIALS_SHEET_NAME = "Materials Data"
 
 
-# Lower this if cold searches are still too slow.
-# Set it back to 25 only if you need very deep old letting pages.
-SEARCH_MAX_PAGES_PER_LETTING = 4
+# One letting detail page contains the contract list, including large lettings.
+# Indexing page 1 only avoids duplicate ?page= requests and is the main speed win.
+SEARCH_MAX_PAGES_PER_LETTING = 1
 CACHE_TTL_SECONDS = 86400
+PUBLIC_SEARCH_CACHE_TTL_SECONDS = 15 * 60
 
-# Search speed controls.
-# These are intentionally aggressive because live IDOT/archive searching was
-# taking too long inside one Streamlit button click.
-REQUEST_TIMEOUT_SECONDS = 6
-RECENT_LETTINGS_FIRST = 4
-FAST_PAGES_PER_LETTING = 2
-FAST_SEARCH_TIME_BUDGET_SECONDS = 18
-PUBLIC_SEARCH_MAX_CANDIDATES = 2
+# Balanced lookup controls. A normal miss checks stale recent lettings, performs
+# one exact-number public search, and permanently indexes a mixed batch of newer
+# and older unchecked letting pages.
+REQUEST_TIMEOUT_SECONDS = 7
+RECENT_LETTINGS_FIRST = 6
+FAST_PAGES_PER_LETTING = 1
+FAST_SEARCH_TIME_BUDGET_SECONDS = 24
+PUBLIC_SEARCH_MAX_CANDIDATES = 4
+INCREMENTAL_ARCHIVE_BATCH_SIZE = 18
 
-# Keep these OFF for normal lookup speed. Turning them on makes lookup more
-# exhaustive, but it can make the app feel slow again.
-ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP = False
+# Exact public search is useful for contracts older than the visible archive.
+ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP = True
 ENABLE_FULL_ARCHIVE_ON_FAST_LOOKUP = False
 ENABLE_AUTO_INDEX_BUILD_ON_LOOKUP = False
 
-# Public search while building the archive list is the biggest cold-start slowdown.
-# Keep this False for speed. Set True only when you need to find very old lettings
-# that are not directly linked from the IDOT home/archive page.
+# Direct official IDOT archive links are used first. Search-engine resolution of
+# every archive date remains off because it is slow and unnecessary for normal use.
 RESOLVE_ARCHIVE_DATES_WITH_SEARCH = False
 MAX_ARCHIVE_DATES_TO_RESOLVE = 3
 
-# Persistent contract lookup database. This makes repeat searches instant even
-# after Streamlit restarts or the cache is cleared.
+# Persistent contract lookup database. This is the separate older-job record.
 CONTRACT_INDEX_DB_PATH = BASE_DIR / "idot_contract_index.sqlite"
-CONTRACT_MISS_TTL_SECONDS = 3600
-RECENT_INDEX_LETTINGS = 4
-RECENT_INDEX_MAX_PAGES_PER_LETTING = 2
-FULL_INDEX_MAX_PAGES_PER_LETTING = SEARCH_MAX_PAGES_PER_LETTING
-INDEX_MAX_WORKERS = 8
+CONTRACT_MISS_TTL_SECONDS = 300
+RECENT_INDEX_LETTINGS = RECENT_LETTINGS_FIRST
+RECENT_INDEX_MAX_PAGES_PER_LETTING = 1
+FULL_INDEX_MAX_PAGES_PER_LETTING = 1
+INDEX_MAX_WORKERS = 12
 RECENT_INDEX_TTL_SECONDS = 6 * 3600
 FULL_INDEX_TTL_SECONDS = CACHE_TTL_SECONDS
 
@@ -866,6 +865,7 @@ def get_all_archive_letting_links_newest_first(session):
     home_html = get_html(session, IDOT_HOME_URL)
 
     direct_links = extract_letting_links_from_any_html(home_html)
+    archive_dates = extract_archive_dates_from_home(home_html)
     current = get_current_letting_link(session, home_html)
 
     final_links = []
@@ -875,15 +875,25 @@ def get_all_archive_letting_links_newest_first(session):
         final_links.append(current)
         seen_urls.add(current["url"])
 
-    # Direct links are cheap and usually already ordered newest-to-oldest by IDOT.
-    for link in direct_links:
-        if link["url"] not in seen_urls:
-            final_links.append(link)
-            seen_urls.add(link["url"])
+    # Direct links are cheap and are normally ordered newest-to-oldest by IDOT.
+    # Raw HTML extraction can lose the visible date text, so pair the remaining
+    # links with the archive-date sequence when their label is generic.
+    archive_date_index = 0
+    for raw_link in direct_links:
+        link = dict(raw_link)
+        if link["url"] in seen_urls:
+            continue
+
+        generic_text = clean_line(link.get("text", "")).lower() in ["", "letting"]
+        if generic_text and archive_date_index < len(archive_dates):
+            link["text"] = archive_dates[archive_date_index]
+
+        archive_date_index += 1
+        final_links.append(link)
+        seen_urls.add(link["url"])
 
     # Slow optional fallback for archive dates that do not expose direct links.
     if RESOLVE_ARCHIVE_DATES_WITH_SEARCH:
-        archive_dates = extract_archive_dates_from_home(home_html)
         resolved_count = 0
 
         for date_text in archive_dates:
@@ -1002,13 +1012,27 @@ def add_contract_to_index(contract_index, label, result):
 # PERSISTENT CONTRACT LOOKUP INDEX
 # ============================================================
 
+def _sqlite_table_columns(conn, table_name):
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _sqlite_add_column_if_missing(conn, table_name, column_name, declaration):
+    if column_name not in _sqlite_table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}")
+
+
 def get_contract_db_connection():
-    """Create the local SQLite index database if needed and return a connection."""
+    """Create/migrate the local persistent contract index and return a connection."""
     conn = sqlite3.connect(CONTRACT_INDEX_DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
     except Exception:
         pass
 
@@ -1031,9 +1055,16 @@ def get_contract_db_connection():
         """
         CREATE TABLE IF NOT EXISTS contract_misses (
             query TEXT PRIMARY KEY,
-            updated_at REAL
+            updated_at REAL,
+            indexed_lettings INTEGER DEFAULT 0
         )
         """
+    )
+    _sqlite_add_column_if_missing(
+        conn,
+        "contract_misses",
+        "indexed_lettings",
+        "INTEGER DEFAULT 0",
     )
 
     conn.execute(
@@ -1046,6 +1077,29 @@ def get_contract_db_connection():
         """
     )
 
+    # This table is the persistent record of which old letting pages have
+    # already been checked. It prevents every search from starting at page one.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS letting_index (
+            letting_url TEXT PRIMARY KEY,
+            letting TEXT,
+            source TEXT,
+            position INTEGER,
+            discovered_at REAL,
+            indexed_at REAL,
+            contract_count INTEGER DEFAULT 0,
+            last_error TEXT
+        )
+        """
+    )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_letting_position ON letting_index(position)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_letting_indexed_at ON letting_index(indexed_at)"
+    )
     conn.commit()
     return conn
 
@@ -1087,6 +1141,7 @@ def sqlite_delete_contract_url(url):
     url = clean_line(url)
     if not url:
         return
+
     try:
         with get_contract_db_connection() as conn:
             conn.execute("DELETE FROM contracts WHERE url = ?", (url,))
@@ -1135,65 +1190,272 @@ def sqlite_save_contract_result(label, result, source_suffix=""):
                     ),
                 )
 
-            # A successful find means this query should no longer be treated as a miss.
-            conn.execute("DELETE FROM contract_misses WHERE query IN ({})".format(
-                ",".join(["?"] * len(keys))
-            ), keys)
+            placeholders = ",".join(["?"] * len(keys))
+            conn.execute(
+                f"DELETE FROM contract_misses WHERE query IN ({placeholders})",
+                keys,
+            )
             conn.commit()
     except Exception:
         pass
 
 
 def sqlite_save_contract_links(letting, page_num, contract_links, source_suffix="sqlite-index"):
+    """Save one letting's contracts in a single SQLite transaction."""
+    rows = []
+    successful_queries = []
     saved_count = 0
+    now = time.time()
 
     for contract in contract_links:
-        label = contract.get("label", "")
-        if not normalize_contract_input(label):
+        label = normalize_contract_input(contract.get("label", ""))
+        if not label:
             continue
 
-        result = make_contract_result(contract, letting, page_num, source_suffix=source_suffix)
-        sqlite_save_contract_result(label, result)
+        result = make_contract_result(
+            contract,
+            letting,
+            page_num,
+            source_suffix=source_suffix,
+        )
+        url = clean_line(result.get("url", ""))
+        if not url:
+            continue
+
+        keys = [label]
+        if "-" in label:
+            suffix = label.split("-")[-1]
+            if suffix and suffix not in keys:
+                keys.append(suffix)
+
+        for contract_key in keys:
+            rows.append((
+                contract_key,
+                label,
+                url,
+                clean_line(result.get("letting", "")),
+                clean_line(result.get("letting_url", "")),
+                str(result.get("page", "")),
+                clean_line(result.get("source", "")),
+                now,
+            ))
+            successful_queries.append((contract_key,))
+
         saved_count += 1
+
+    if not rows:
+        return 0
+
+    try:
+        with get_contract_db_connection() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO contracts
+                (contract_key, label, url, letting, letting_url, page, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.executemany(
+                "DELETE FROM contract_misses WHERE query = ?",
+                successful_queries,
+            )
+            conn.commit()
+    except Exception:
+        return 0
 
     return saved_count
 
 
+def sqlite_sync_letting_catalog(letting_links):
+    """Store the official letting list and preserve prior indexing progress."""
+    now = time.time()
+
+    try:
+        with get_contract_db_connection() as conn:
+            for position, letting in enumerate(letting_links):
+                url = clean_line(letting.get("url", ""))
+                if not url:
+                    continue
+
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO letting_index
+                    (letting_url, letting, source, position, discovered_at,
+                     indexed_at, contract_count, last_error)
+                    VALUES (?, ?, ?, ?, ?, NULL, 0, '')
+                    """,
+                    (
+                        url,
+                        clean_line(letting.get("text", "")),
+                        clean_line(letting.get("source", "")),
+                        position,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE letting_index
+                    SET letting = ?, source = ?, position = ?
+                    WHERE letting_url = ?
+                    """,
+                    (
+                        clean_line(letting.get("text", "")),
+                        clean_line(letting.get("source", "")),
+                        position,
+                        url,
+                    ),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def sqlite_mark_letting_indexed(letting, contract_count, error=""):
+    url = clean_line(letting.get("url", ""))
+    if not url:
+        return
+
+    try:
+        with get_contract_db_connection() as conn:
+            if error:
+                conn.execute(
+                    """
+                    UPDATE letting_index
+                    SET last_error = ?
+                    WHERE letting_url = ?
+                    """,
+                    (clean_line(error)[:500], url),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE letting_index
+                    SET indexed_at = ?, contract_count = ?, last_error = ''
+                    WHERE letting_url = ?
+                    """,
+                    (time.time(), int(contract_count), url),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def sqlite_get_letting_state():
+    state = {}
+
+    try:
+        with get_contract_db_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT letting_url, position, indexed_at, contract_count, last_error
+                FROM letting_index
+                """
+            ).fetchall()
+
+        for row in rows:
+            state[clean_line(row["letting_url"])] = {
+                "position": int(row["position"] or 0),
+                "indexed_at": float(row["indexed_at"] or 0),
+                "contract_count": int(row["contract_count"] or 0),
+                "last_error": clean_line(row["last_error"]),
+            }
+    except Exception:
+        pass
+
+    return state
+
+
+def sqlite_index_stats():
+    stats = {
+        "contracts": 0,
+        "known_lettings": 0,
+        "indexed_lettings": 0,
+        "failed_lettings": 0,
+    }
+
+    try:
+        with get_contract_db_connection() as conn:
+            stats["contracts"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM contracts WHERE instr(contract_key, '-') > 0"
+                ).fetchone()[0]
+            )
+            stats["known_lettings"] = int(
+                conn.execute("SELECT COUNT(*) FROM letting_index").fetchone()[0]
+            )
+            stats["indexed_lettings"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM letting_index WHERE indexed_at IS NOT NULL"
+                ).fetchone()[0]
+            )
+            stats["failed_lettings"] = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM letting_index
+                    WHERE indexed_at IS NULL AND COALESCE(last_error, '') <> ''
+                    """
+                ).fetchone()[0]
+            )
+    except Exception:
+        pass
+
+    return stats
+
+
+def sqlite_is_full_index_current():
+    stats = sqlite_index_stats()
+    return (
+        stats["known_lettings"] > 0
+        and stats["indexed_lettings"] >= stats["known_lettings"]
+    )
+
+
 def sqlite_is_recent_miss(user_job_number):
     query = normalize_contract_input(user_job_number)
-
     if not query:
         return False
+
+    current_indexed = sqlite_index_stats()["indexed_lettings"]
 
     try:
         with get_contract_db_connection() as conn:
             row = conn.execute(
-                "SELECT updated_at FROM contract_misses WHERE query = ? LIMIT 1",
+                """
+                SELECT updated_at, indexed_lettings
+                FROM contract_misses
+                WHERE query = ?
+                LIMIT 1
+                """,
                 (query,),
             ).fetchone()
 
         if row is None:
             return False
 
-        return (time.time() - float(row["updated_at"])) < CONTRACT_MISS_TTL_SECONDS
+        same_index_generation = int(row["indexed_lettings"] or 0) == current_indexed
+        still_fresh = (time.time() - float(row["updated_at"] or 0)) < CONTRACT_MISS_TTL_SECONDS
+        return same_index_generation and still_fresh
     except Exception:
         return False
 
 
 def sqlite_record_miss(user_job_number):
     query = normalize_contract_input(user_job_number)
-
     if not query:
         return
+
+    indexed_lettings = sqlite_index_stats()["indexed_lettings"]
 
     try:
         with get_contract_db_connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO contract_misses (query, updated_at)
-                VALUES (?, ?)
+                INSERT OR REPLACE INTO contract_misses
+                (query, updated_at, indexed_lettings)
+                VALUES (?, ?, ?)
                 """,
-                (query, time.time()),
+                (query, time.time(), indexed_lettings),
             )
             conn.commit()
     except Exception:
@@ -1234,125 +1496,146 @@ def sqlite_set_meta(key, value):
 def make_letting_signature(letting_links):
     pieces = []
     for letting in letting_links:
-        pieces.append(clean_line(letting.get("text", "")) + "|" + clean_line(letting.get("url", "")))
+        pieces.append(
+            clean_line(letting.get("text", ""))
+            + "|"
+            + clean_line(letting.get("url", ""))
+        )
     return "||".join(pieces)
 
 
 def fetch_contract_links_for_index(page_url):
-    """Thread worker: fetch and parse one IDOT letting page."""
+    """Thread worker: fetch and parse one complete IDOT letting page."""
     try:
         session = make_session()
         html = get_html(session, page_url)
-        return get_contract_links_from_letting_page(html)
-    except Exception:
-        return []
+        return get_contract_links_from_letting_page(html), ""
+    except Exception as exc:
+        return [], str(exc)
+
+
+def index_letting_batch(letting_links, user_job_number="", source_suffix="sqlite-index"):
+    """
+    Fetch each letting once, save every contract found, and optionally return a
+    requested contract. IDOT's letting detail page contains the contract list on
+    its main page, so extra ?page= requests add cost without adding coverage.
+    """
+    if not letting_links:
+        return {
+            "checked_lettings": 0,
+            "checked_pages": 0,
+            "saved_contracts": 0,
+            "failed_lettings": 0,
+            "match": None,
+        }
+
+    requested = normalize_contract_input(user_job_number)
+    found = None
+    checked = 0
+    saved = 0
+    failed = 0
+
+    workers = max(1, min(INDEX_MAX_WORKERS, len(letting_links)))
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(fetch_contract_links_for_index, letting["url"]): letting
+            for letting in letting_links
+            if clean_line(letting.get("url", ""))
+        }
+
+        for future in as_completed(future_map):
+            letting = future_map[future]
+            checked += 1
+
+            try:
+                contract_links, error = future.result()
+            except Exception as exc:
+                contract_links, error = [], str(exc)
+
+            if error:
+                failed += 1
+                sqlite_mark_letting_indexed(letting, 0, error=error)
+                continue
+
+            saved += sqlite_save_contract_links(
+                letting=letting,
+                page_num=1,
+                contract_links=contract_links,
+                source_suffix=source_suffix,
+            )
+            sqlite_mark_letting_indexed(letting, len(contract_links))
+
+            if requested and found is None:
+                for contract in contract_links:
+                    label = contract.get("label", "")
+                    if contract_matches(requested, label):
+                        found = make_contract_result(
+                            contract,
+                            letting,
+                            1,
+                            source_suffix=source_suffix,
+                        )
+                        sqlite_save_contract_result(label, found)
+                        break
+
+    return {
+        "checked_lettings": checked,
+        "checked_pages": checked,
+        "saved_contracts": saved,
+        "failed_lettings": failed,
+        "match": found,
+    }
 
 
 def build_sqlite_contract_index_for_lettings(
     letting_links,
-    max_pages_per_letting,
+    max_pages_per_letting=1,
     meta_key="",
     meta_ttl_seconds=0,
     force=False,
     source_suffix="sqlite-index",
 ):
-    """
-    Build/update the persistent SQLite index.
-
-    This keeps the app UI unchanged: the user still only enters the job number.
-    The indexing is automatic and stored in idot_contract_index.sqlite.
-    """
+    """Build or refresh the persistent index using one request per letting."""
     if not letting_links:
-        return {"checked_lettings": 0, "checked_pages": 0, "saved_contracts": 0}
+        return {
+            "checked_lettings": 0,
+            "checked_pages": 0,
+            "saved_contracts": 0,
+            "failed_lettings": 0,
+        }
 
+    sqlite_sync_letting_catalog(letting_links)
     signature = make_letting_signature(letting_links)
 
     if meta_key and not force:
         saved_signature, updated_at = sqlite_get_meta(meta_key)
         if saved_signature == signature and (time.time() - updated_at) < meta_ttl_seconds:
-            return {"checked_lettings": 0, "checked_pages": 0, "saved_contracts": 0, "skipped": True}
+            return {
+                "checked_lettings": 0,
+                "checked_pages": 0,
+                "saved_contracts": 0,
+                "failed_lettings": 0,
+                "skipped": True,
+            }
 
-    page_jobs = []
+    result = index_letting_batch(
+        letting_links,
+        source_suffix=source_suffix,
+    )
 
-    for letting in letting_links:
-        letting_url = letting.get("url", "")
-        if not letting_url:
-            continue
-
-        for page_num in range(1, max_pages_per_letting + 1):
-            page_url = letting_url if page_num == 1 else set_query_param(letting_url, "page", page_num)
-            page_jobs.append((letting, page_num, page_url))
-
-    page_results = []
-
-    workers = max(1, min(INDEX_MAX_WORKERS, len(page_jobs)))
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {
-            executor.submit(fetch_contract_links_for_index, page_url): (letting, page_num, page_url)
-            for letting, page_num, page_url in page_jobs
-        }
-
-        for future in as_completed(future_map):
-            letting, page_num, page_url = future_map[future]
-            try:
-                contract_links = future.result()
-            except Exception:
-                contract_links = []
-            page_results.append((letting, page_num, page_url, contract_links))
-
-    # Process pages in natural order per letting so duplicate/empty page detection still works.
-    grouped = {}
-    letting_order = []
-
-    for letting, page_num, page_url, contract_links in page_results:
-        letting_url = letting.get("url", "")
-        if letting_url not in grouped:
-            grouped[letting_url] = []
-            letting_order.append(letting_url)
-        grouped[letting_url].append((page_num, letting, page_url, contract_links))
-
-    checked_lettings = 0
-    checked_pages = 0
-    saved_contracts = 0
-
-    for letting_url in letting_order:
-        checked_lettings += 1
-        seen_page_signatures = set()
-
-        for page_num, letting, page_url, contract_links in sorted(grouped[letting_url], key=lambda x: x[0]):
-            if not contract_links:
-                break
-
-            page_signature = get_page_signature(contract_links)
-
-            if page_signature in seen_page_signatures:
-                break
-
-            seen_page_signatures.add(page_signature)
-            checked_pages += 1
-            saved_contracts += sqlite_save_contract_links(
-                letting=letting,
-                page_num=page_num,
-                contract_links=contract_links,
-                source_suffix=source_suffix,
-            )
-
-    if meta_key:
+    if meta_key and result["failed_lettings"] == 0:
         sqlite_set_meta(meta_key, signature)
 
-    return {
-        "checked_lettings": checked_lettings,
-        "checked_pages": checked_pages,
-        "saved_contracts": saved_contracts,
-    }
+    result.pop("match", None)
+    return result
 
 
 def ensure_recent_sqlite_contract_index(letting_links):
     recent_lettings = letting_links[:RECENT_INDEX_LETTINGS]
     return build_sqlite_contract_index_for_lettings(
         recent_lettings,
-        max_pages_per_letting=RECENT_INDEX_MAX_PAGES_PER_LETTING,
+        max_pages_per_letting=1,
         meta_key="recent_contract_index",
         meta_ttl_seconds=RECENT_INDEX_TTL_SECONDS,
         force=False,
@@ -1360,26 +1643,63 @@ def ensure_recent_sqlite_contract_index(letting_links):
     )
 
 
-def ensure_full_sqlite_contract_index(letting_links):
+def ensure_full_sqlite_contract_index(letting_links, force=False):
     return build_sqlite_contract_index_for_lettings(
         letting_links,
-        max_pages_per_letting=FULL_INDEX_MAX_PAGES_PER_LETTING,
+        max_pages_per_letting=1,
         meta_key="full_contract_index",
         meta_ttl_seconds=FULL_INDEX_TTL_SECONDS,
-        force=False,
+        force=force,
         source_suffix="sqlite-full-index",
     )
 
 
+def select_recent_lettings_needing_refresh(letting_links):
+    state = sqlite_get_letting_state()
+    now = time.time()
+    selected = []
+
+    for letting in letting_links[:RECENT_LETTINGS_FIRST]:
+        row = state.get(clean_line(letting.get("url", "")), {})
+        indexed_at = float(row.get("indexed_at", 0) or 0)
+        if not indexed_at or (now - indexed_at) >= RECENT_INDEX_TTL_SECONDS:
+            selected.append(letting)
+
+    return selected
+
+
+def select_incremental_archive_batch(letting_links, batch_size=None):
+    """
+    Pick a balanced batch of unindexed archive pages: half from the newer side
+    and half from the oldest side. Each miss expands permanent coverage instead
+    of repeating the same recent pages.
+    """
+    batch_size = batch_size or INCREMENTAL_ARCHIVE_BATCH_SIZE
+    state = sqlite_get_letting_state()
+
+    unindexed = []
+    for letting in letting_links[RECENT_LETTINGS_FIRST:]:
+        row = state.get(clean_line(letting.get("url", "")), {})
+        if not float(row.get("indexed_at", 0) or 0):
+            unindexed.append(letting)
+
+    if len(unindexed) <= batch_size:
+        return unindexed
+
+    newer_count = (batch_size + 1) // 2
+    older_count = batch_size - newer_count
+    selected = unindexed[:newer_count]
+
+    for letting in reversed(unindexed[-older_count:]):
+        if letting not in selected:
+            selected.append(letting)
+
+    return selected[:batch_size]
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def cached_contract_lookup_index():
-    """
-    Read the SQLite index into memory without building/refreshing it.
-    Building the full archive index inside lookup is intentionally disabled.
-    """
     contract_index = {}
-    checked_lettings = 0
-    checked_pages = 0
 
     try:
         with get_contract_db_connection() as conn:
@@ -1402,18 +1722,27 @@ def cached_contract_lookup_index():
     except Exception:
         pass
 
-    return {
-        "contracts": contract_index,
-        "checked_lettings": checked_lettings,
-        "checked_pages": checked_pages,
-    }
+    return {"contracts": contract_index}
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def duckduckgo_html_search(session, query):
+    search_url = "https://html.duckduckgo.com/html/?q=" + quote(query)
+    response = session.get(
+        search_url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={
+            "User-Agent": "Mozilla/5.0 IDR Generator",
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        },
+    )
+    response.raise_for_status()
+    return response.text, search_url
+
+
+@st.cache_data(ttl=PUBLIC_SEARCH_CACHE_TTL_SECONDS, show_spinner=False)
 def cached_public_contract_search(user_job_number):
     cached_session = make_session()
     return find_contract_detail_url_from_public_search(cached_session, user_job_number)
-
 
 
 def search_time_exceeded(start_time):
@@ -1423,78 +1752,42 @@ def search_time_exceeded(start_time):
 
 
 def letting_page_matches_contract(session, letting, user_job_number, max_pages=None, start_time=None):
-    """
-    Fast direct IDOT page scan.
-
-    Important: this does NOT walk every archive page by default. It scans only a
-    small number of pages for each recent letting, saves anything it sees into
-    SQLite, and returns as soon as it finds the requested contract.
-    """
-    seen_page_signatures = set()
-    max_pages = max_pages or FAST_PAGES_PER_LETTING
-
-    for page_num in range(1, max_pages + 1):
-        if search_time_exceeded(start_time):
-            break
-
-        if page_num == 1:
-            page_url = letting["url"]
-        else:
-            page_url = set_query_param(letting["url"], "page", page_num)
-
-        try:
-            contract_links = cached_contract_links_for_page(page_url)
-        except Exception:
-            try:
-                html = get_html(session, page_url)
-                contract_links = get_contract_links_from_letting_page(html)
-            except Exception:
-                break
-
-        if not contract_links:
-            break
-
-        page_signature = get_page_signature(contract_links)
-
-        if page_signature in seen_page_signatures:
-            break
-
-        seen_page_signatures.add(page_signature)
-        sqlite_save_contract_links(
-            letting=letting,
-            page_num=page_num,
-            contract_links=contract_links,
-            source_suffix="fast-visited-page",
-        )
-
-        for contract in contract_links:
-            label = contract.get("label", "")
-
-            if contract_matches(user_job_number, label):
-                result = make_contract_result(contract, letting, page_num, source_suffix="fast-page")
-                sqlite_save_contract_result(label, result)
-                return result
-
-    return None
+    # Kept for compatibility with the rest of the app. One letting page is now
+    # treated as one complete indexing unit.
+    result = index_letting_batch(
+        [letting],
+        user_job_number=user_job_number,
+        source_suffix="fast-page",
+    )
+    return result.get("match")
 
 
 def find_contract_detail_url_from_public_search(session, user_job_number):
-    """
-    Very small public-search fallback.
-
-    This is disabled by default through ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP
-    because search engines were one of the biggest reasons the lookup felt slow.
-    """
+    """Exact-number web-search fallback for contracts outside the visible archive."""
     user_job_number = normalize_contract_input(user_job_number)
+    queries = [
+        f'"{user_job_number}" "LbContractDetail/Index" "webapps1.dot.illinois.gov/WCTB"',
+        f'"{user_job_number}" "Item-Contract" "Illinois Department of Transportation"',
+    ]
 
-    search_query = f'"{user_job_number}" "LbContractDetail/Index" "webapps1.dot.illinois.gov/WCTB"'
     candidate_urls = []
 
-    try:
-        text, _ = bing_rss_search(session, search_query)
-        candidate_urls.extend(extract_contract_urls_from_search_text(text))
-    except Exception:
-        candidate_urls = []
+    for query in queries:
+        try:
+            text, _ = bing_rss_search(session, query)
+            candidate_urls.extend(extract_contract_urls_from_search_text(text))
+        except Exception:
+            pass
+
+        if len(candidate_urls) < PUBLIC_SEARCH_MAX_CANDIDATES:
+            try:
+                html, _ = duckduckgo_html_search(session, query)
+                candidate_urls.extend(extract_duckduckgo_result_urls(html))
+            except Exception:
+                pass
+
+        if len(candidate_urls) >= PUBLIC_SEARCH_MAX_CANDIDATES:
+            break
 
     cleaned_urls = []
     seen = set()
@@ -1504,10 +1797,7 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
         url = url.replace("webapps.dot.illinois.gov", "webapps1.dot.illinois.gov")
         url = url.strip()
 
-        if "LbContractDetail/Index" not in url:
-            continue
-
-        if url in seen:
+        if "LbContractDetail/Index" not in url or url in seen:
             continue
 
         seen.add(url)
@@ -1526,14 +1816,13 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
                 result = {
                     "label": label,
                     "url": url,
-                    "letting": metadata.get("letting_date", "Found by public contract search"),
+                    "letting": metadata.get("letting_date", "Found by exact public search"),
                     "letting_url": "",
                     "page": "",
-                    "source": "public-contract-search-fast",
+                    "source": "public-contract-search",
                 }
                 sqlite_save_contract_result(label, result)
                 return result
-
         except Exception:
             continue
 
@@ -1542,18 +1831,16 @@ def find_contract_detail_url_from_public_search(session, user_job_number):
 
 def find_contract_detail_url(session, job_number):
     """
-    Fast lookup path.
+    Balanced lookup path:
+    1. Direct URL.
+    2. Instant persistent SQLite lookup.
+    3. Refresh a few current/recent lettings only when stale.
+    4. Exact-number public search.
+    5. Index a balanced chunk of previously unchecked archive lettings.
 
-    Order:
-    1. Direct contract URL, if pasted.
-    2. Local SQLite lookup.
-    3. Small recent/current IDOT page scan.
-    4. Optional tiny public search, off by default.
-    5. Optional full archive/index search, off by default.
-
-    The point is to stop the app from hanging during a normal job lookup.
+    Every successful archive scan is permanently recorded, so coverage grows
+    without making every normal lookup a full-archive crawl.
     """
-    start_time = time.time()
     original_input = job_number.strip()
 
     if not original_input:
@@ -1581,96 +1868,74 @@ def find_contract_detail_url(session, job_number):
 
     user_job_number = normalize_contract_input(original_input)
 
-    # Fastest path: local persistent lookup. This should be instant after a job
-    # has been found once or if the SQLite index already has it.
     result = sqlite_lookup_contract(user_job_number)
     if result is not None:
         return result
-
-    # Avoid repeating known bad searches for a short time.
-    if sqlite_is_recent_miss(user_job_number):
-        raise ValueError(
-            f"Could not find contract '{user_job_number}'. This job number was already searched recently. "
-            "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
-        )
-
-    checked_lettings = 0
-    checked_pages = 0
 
     try:
         letting_links = cached_archive_letting_links_newest_first()
     except Exception:
         letting_links = get_all_archive_letting_links_newest_first(session)
 
-    # Do not build a 64-page or full archive index inside the lookup click.
-    # Just scan a small recent window and save anything seen into SQLite.
-    recent_lettings = letting_links[:RECENT_LETTINGS_FIRST]
+    sqlite_sync_letting_catalog(letting_links)
 
-    for letting in recent_lettings:
-        if search_time_exceeded(start_time):
-            break
-
-        checked_lettings += 1
-        before = time.time()
-
-        result = letting_page_matches_contract(
-            session=session,
-            letting=letting,
-            user_job_number=user_job_number,
-            max_pages=FAST_PAGES_PER_LETTING,
-            start_time=start_time,
+    # A cached miss is trusted only when the archive index is already complete
+    # and the index has not grown since that miss was recorded.
+    if sqlite_is_full_index_current() and sqlite_is_recent_miss(user_job_number):
+        raise ValueError(
+            f"Could not find contract '{user_job_number}' in the complete local archive index. "
+            "Check the number, try the full form such as 001-62K33, or paste the direct contract URL."
         )
 
-        checked_pages += FAST_PAGES_PER_LETTING
+    recent_to_refresh = select_recent_lettings_needing_refresh(letting_links)
+    if recent_to_refresh:
+        recent_result = index_letting_batch(
+            recent_to_refresh,
+            user_job_number=user_job_number,
+            source_suffix="recent-refresh",
+        )
+        if recent_result.get("match") is not None:
+            return recent_result["match"]
 
-        if result is not None:
-            return result
-
-        # If IDOT is slow for a single letting, do not keep piling on requests.
-        if time.time() - before > REQUEST_TIMEOUT_SECONDS + 2:
-            break
-
-    # Re-check SQLite because the recent page scan writes all seen contracts.
     result = sqlite_lookup_contract(user_job_number)
     if result is not None:
         return result
 
-    # Optional tiny public search. Off by default for speed.
-    if ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP and not search_time_exceeded(start_time):
+    if ENABLE_PUBLIC_SEARCH_ON_FAST_LOOKUP:
         result = cached_public_contract_search(user_job_number)
         if result is not None:
             return result
 
-    # Optional exhaustive archive search. Off by default because this is exactly
-    # what was making lookup too slow.
-    if ENABLE_FULL_ARCHIVE_ON_FAST_LOOKUP and not search_time_exceeded(start_time):
-        for letting in letting_links[RECENT_LETTINGS_FIRST:]:
-            if search_time_exceeded(start_time):
-                break
+    archive_batch = select_incremental_archive_batch(letting_links)
+    if archive_batch:
+        archive_result = index_letting_batch(
+            archive_batch,
+            user_job_number=user_job_number,
+            source_suffix="incremental-archive",
+        )
+        if archive_result.get("match") is not None:
+            return archive_result["match"]
 
-            checked_lettings += 1
+    result = sqlite_lookup_contract(user_job_number)
+    if result is not None:
+        return result
 
-            result = letting_page_matches_contract(
-                session=session,
-                letting=letting,
-                user_job_number=user_job_number,
-                max_pages=1,
-                start_time=start_time,
-            )
-
-            checked_pages += 1
-
-            if result is not None:
-                return result
-
+    stats = sqlite_index_stats()
     sqlite_record_miss(user_job_number)
 
+    if stats["known_lettings"] and stats["indexed_lettings"] >= stats["known_lettings"]:
+        coverage_text = "The complete visible IDOT archive has been indexed."
+    else:
+        coverage_text = (
+            f"The local index currently covers {stats['indexed_lettings']} of "
+            f"{stats['known_lettings']} visible letting pages."
+        )
+
     raise ValueError(
-        f"Could not find contract '{user_job_number}' quickly. "
-        f"Fast lookup checked {checked_lettings} recent/current letting page group(s) "
-        f"and about {checked_pages} page(s). "
-        "I stopped before running the slow full archive search. "
-        "Try the full item-contract number like 001-62K33, or paste the direct contract detail URL."
+        f"Could not find contract '{user_job_number}'. {coverage_text} "
+        "Each unsuccessful search now indexes additional older lettings. "
+        "Use the sidebar's Build / Refresh Full Job Index button for maximum coverage, "
+        "or paste the direct contract detail URL."
     )
 
 # ============================================================
@@ -2094,26 +2359,40 @@ def parse_pay_items_from_contract_page_text(html):
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def fetch_idot_job(job_number):
     session = make_session()
+    direct_input = clean_line(job_number).lower().startswith("http")
+    last_error = None
 
-    match = find_contract_detail_url(session, job_number)
+    # Retry once when a stale URL was loaded from the persistent index. The bad
+    # record is removed before the second lookup so the app can rediscover it.
+    for attempt in range(2):
+        match = find_contract_detail_url(session, job_number)
 
-    html = get_html(session, match["url"])
-    metadata = parse_metadata_from_contract_page(html, match["url"])
+        try:
+            html = get_html(session, match["url"])
+            metadata = parse_metadata_from_contract_page(html, match["url"])
 
-    if not metadata.get("item_contract"):
-        metadata["item_contract"] = match.get("label", "")
+            if not metadata.get("item_contract"):
+                metadata["item_contract"] = match.get("label", "")
 
-    pay_items = parse_pay_items_from_pay_item_report(session, match["url"], html)
+            pay_items = parse_pay_items_from_pay_item_report(session, match["url"], html)
 
-    if pay_items.empty:
-        pay_items = parse_pay_items_from_contract_page_text(html)
+            if pay_items.empty:
+                pay_items = parse_pay_items_from_contract_page_text(html)
 
-    if pay_items.empty:
-        raise ValueError(
-            "Found the contract page, but could not extract pay items from the Pay Item Report or page text."
-        )
+            if pay_items.empty:
+                raise ValueError(
+                    "Found the contract page, but could not extract pay items from the Pay Item Report or page text."
+                )
 
-    return metadata, pay_items, match
+            return metadata, pay_items, match
+
+        except Exception as exc:
+            last_error = exc
+            if direct_input or attempt == 1:
+                break
+            sqlite_delete_contract_url(match.get("url", ""))
+
+    raise last_error or ValueError("Could not load the IDOT contract page.")
 
 
 # ============================================================
@@ -3026,116 +3305,163 @@ def make_pay_items_excel(metadata, pay_items):
 # STREAMLIT APP
 # ============================================================
 
-st.set_page_config(
-    page_title="IDOT Job IDR Generator",
-    page_icon="📄",
-    layout="wide",
-)
-
-st.title("IDOT Job IDR Generator")
-st.write(
-    "Enter an IDOT job/contract number or paste the direct IDOT contract URL. "
-    "The website fills the IDR form and exports a PDF that matches the Excel template layout."
-)
-
-with st.sidebar:
-    st.header("Job Lookup")
-    job_number = st.text_input(
-        "IDOT Job / Contract Number or Contract Detail URL",
-        placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
+def main():
+    st.set_page_config(
+        page_title="IDOT Job IDR Generator",
+        page_icon="📄",
+        layout="wide",
     )
-if "metadata" not in st.session_state:
-    st.session_state.metadata = None
-if "pay_items" not in st.session_state:
-    st.session_state.pay_items = pd.DataFrame()
-if "match" not in st.session_state:
-    st.session_state.match = None
 
-if st.button("Find IDOT Job"):
-    try:
-        with st.spinner("Fast lookup: checking local index and recent IDOT letting pages..."):
-            metadata, pay_items, match = fetch_idot_job(job_number)
-        st.session_state.metadata = metadata
-        st.session_state.pay_items = pay_items
-        st.session_state.match = match
-        clear_idr_row_state()
-        st.success(f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items.")
-        if match.get("letting_url"):
-            st.info(f"Found on letting/archive page: {match.get('letting', '')}, page {match.get('page', '')}")
-        else:
-            st.info(f"Found using: {match.get('letting', '')}")
-    except Exception as e:
-        st.error(str(e))
+    st.title("IDOT Job IDR Generator")
+    st.write(
+        "Enter an IDOT job/contract number or paste the direct IDOT contract URL. "
+        "The website fills the IDR form and exports a PDF that matches the Excel template layout."
+    )
 
-metadata = st.session_state.metadata
-pay_items = st.session_state.pay_items
-
-if metadata is not None:
-    st.subheader("Job Information")
-    required_fields = {
-        "County": metadata.get("county", ""),
-        "Section": metadata.get("key_route", ""),
-        "Route": metadata.get("marked_route", ""),
-        "District": metadata.get("district", ""),
-        "Contract No.": metadata.get("item_contract", ""),
-        "Job No.": metadata.get("state_job", ""),
-        "Project": metadata.get("federal_project", ""),
-    }
-    missing_fields = [name for name, value in required_fields.items() if not value]
-    if missing_fields:
-        st.warning("Some job fields did not parse correctly: " + ", ".join(missing_fields))
-        with st.expander("Parser debug info"):
-            st.write(metadata)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.write(f"**County:** {metadata.get('county', '')}")
-        st.write(f"**Section:** {metadata.get('key_route', '')}")
-        st.write(f"**Route:** {metadata.get('marked_route', '')}")
-    with col2:
-        st.write(f"**District:** {metadata.get('district', '')}")
-        st.write(f"**Contract No.:** {metadata.get('item_contract', '')}")
-        st.write(f"**Job No.:** {metadata.get('state_job', '')}")
-    with col3:
-        st.write(f"**Project:** {metadata.get('federal_project', '')}")
-        st.write(f"**Working Days:** {metadata.get('working_days', '')}")
-
-if metadata is not None and not pay_items.empty:
-    idr_info = build_idr_header_form()
-    st.divider()
-    rows = build_idr_rows_form(pay_items)
-    st.divider()
-
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        pay_items_file = make_pay_items_excel(metadata, pay_items)
-        st.download_button(
-            label="Download IDOT Pay Item Table",
-            data=pay_items_file,
-            file_name=f"{metadata.get('item_contract', 'idot_job')}_pay_items.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    with st.sidebar:
+        st.header("Job Lookup")
+        job_number = st.text_input(
+            "IDOT Job / Contract Number or Contract Detail URL",
+            placeholder="Example: 62K33, 001-62K33, or paste the IDOT contract URL",
         )
-    with col_b:
-        try:
-            filled_xlsx = fill_exact_idr_workbook(metadata, idr_info, rows)
+
+        index_stats = sqlite_index_stats()
+        st.caption(
+            f"Local job index: {index_stats['contracts']} contracts from "
+            f"{index_stats['indexed_lettings']} of {index_stats['known_lettings']} known lettings."
+        )
+        build_full_index = st.button(
+            "Build / Refresh Full Job Index",
+            use_container_width=True,
+            help=(
+                "Checks every visible IDOT letting once and stores all contract URLs in "
+                "idot_contract_index.sqlite. Normal searches stay fast afterward."
+            ),
+        )
+
+        if CONTRACT_INDEX_DB_PATH.exists():
             st.download_button(
-                label="Download Filled IDR Excel Backup",
-                data=filled_xlsx,
-                file_name=format_xlsx_filename(metadata.get("item_contract", "IDOT")),
+                "Download Job Index Backup",
+                data=CONTRACT_INDEX_DB_PATH.read_bytes(),
+                file_name=CONTRACT_INDEX_DB_PATH.name,
+                mime="application/vnd.sqlite3",
+                use_container_width=True,
+            )
+
+    if build_full_index:
+        try:
+            with st.spinner("Building the persistent IDOT contract index..."):
+                index_session = make_session()
+                try:
+                    all_lettings = cached_archive_letting_links_newest_first()
+                except Exception:
+                    all_lettings = get_all_archive_letting_links_newest_first(index_session)
+                build_result = ensure_full_sqlite_contract_index(all_lettings, force=True)
+                st.cache_data.clear()
+
+            st.success(
+                f"Index updated: checked {build_result.get('checked_lettings', 0)} lettings, "
+                f"saved {build_result.get('saved_contracts', 0)} contract records, and "
+                f"had {build_result.get('failed_lettings', 0)} failed letting request(s)."
+            )
+        except Exception as exc:
+            st.error(f"Could not build the full job index: {exc}")
+    if "metadata" not in st.session_state:
+        st.session_state.metadata = None
+    if "pay_items" not in st.session_state:
+        st.session_state.pay_items = pd.DataFrame()
+    if "match" not in st.session_state:
+        st.session_state.match = None
+
+    if st.button("Find IDOT Job"):
+        try:
+            with st.spinner("Checking the local index, exact search, and a saved archive batch..."):
+                metadata, pay_items, match = fetch_idot_job(job_number)
+            st.session_state.metadata = metadata
+            st.session_state.pay_items = pay_items
+            st.session_state.match = match
+            clear_idr_row_state()
+            st.success(f"Found {metadata.get('item_contract', job_number)} with {len(pay_items)} pay items.")
+            if match.get("letting_url"):
+                st.info(f"Found on letting/archive page: {match.get('letting', '')}, page {match.get('page', '')}")
+            else:
+                st.info(f"Found using: {match.get('letting', '')}")
+        except Exception as e:
+            st.error(str(e))
+
+    metadata = st.session_state.metadata
+    pay_items = st.session_state.pay_items
+
+    if metadata is not None:
+        st.subheader("Job Information")
+        required_fields = {
+            "County": metadata.get("county", ""),
+            "Section": metadata.get("key_route", ""),
+            "Route": metadata.get("marked_route", ""),
+            "District": metadata.get("district", ""),
+            "Contract No.": metadata.get("item_contract", ""),
+            "Job No.": metadata.get("state_job", ""),
+            "Project": metadata.get("federal_project", ""),
+        }
+        missing_fields = [name for name, value in required_fields.items() if not value]
+        if missing_fields:
+            st.warning("Some job fields did not parse correctly: " + ", ".join(missing_fields))
+            with st.expander("Parser debug info"):
+                st.write(metadata)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.write(f"**County:** {metadata.get('county', '')}")
+            st.write(f"**Section:** {metadata.get('key_route', '')}")
+            st.write(f"**Route:** {metadata.get('marked_route', '')}")
+        with col2:
+            st.write(f"**District:** {metadata.get('district', '')}")
+            st.write(f"**Contract No.:** {metadata.get('item_contract', '')}")
+            st.write(f"**Job No.:** {metadata.get('state_job', '')}")
+        with col3:
+            st.write(f"**Project:** {metadata.get('federal_project', '')}")
+            st.write(f"**Working Days:** {metadata.get('working_days', '')}")
+
+    if metadata is not None and not pay_items.empty:
+        idr_info = build_idr_header_form()
+        st.divider()
+        rows = build_idr_rows_form(pay_items)
+        st.divider()
+
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            pay_items_file = make_pay_items_excel(metadata, pay_items)
+            st.download_button(
+                label="Download IDOT Pay Item Table",
+                data=pay_items_file,
+                file_name=f"{metadata.get('item_contract', 'idot_job')}_pay_items.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        except Exception as e:
-            st.error(f"Could not prepare filled Excel backup: {e}")
-    with col_c:
-        try:
-            pdf_file = make_exact_idr_pdf(metadata, idr_info, rows)
-            st.download_button(
-                label="Download Exact IDR PDF",
-                data=pdf_file,
-                file_name=format_pdf_filename(metadata.get("item_contract", "IDOT")),
-                mime="application/pdf",
-            )
-        except Exception as e:
-            st.error(f"Could not generate exact PDF: {e}")
-            if not find_libreoffice_executable():
-                st.info("On Streamlit Cloud, add a packages.txt file containing: libreoffice")
+        with col_b:
+            try:
+                filled_xlsx = fill_exact_idr_workbook(metadata, idr_info, rows)
+                st.download_button(
+                    label="Download Filled IDR Excel Backup",
+                    data=filled_xlsx,
+                    file_name=format_xlsx_filename(metadata.get("item_contract", "IDOT")),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            except Exception as e:
+                st.error(f"Could not prepare filled Excel backup: {e}")
+        with col_c:
+            try:
+                pdf_file = make_exact_idr_pdf(metadata, idr_info, rows)
+                st.download_button(
+                    label="Download Exact IDR PDF",
+                    data=pdf_file,
+                    file_name=format_pdf_filename(metadata.get("item_contract", "IDOT")),
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.error(f"Could not generate exact PDF: {e}")
+                if not find_libreoffice_executable():
+                    st.info("On Streamlit Cloud, add a packages.txt file containing: libreoffice")
+
+
+if __name__ == "__main__":
+    main()
