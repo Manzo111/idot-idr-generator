@@ -3032,16 +3032,15 @@ def copy_cell_style(source_cell, target_cell):
 def rebuild_bottom_section_layout(ws):
     """
     Rebuild the lower part of the IDR so it matches the paper form:
-    - rows 19-20: measurement checkboxes with every item code inside parentheses
-    - rows 21-24: permanent instruction in the Remarks area
-    - rows 25-28: optional COGO area-calculation statement
-    - rows 29-33: user's typed remarks
+    - rows 19-20: measurement checkboxes with item numbers directly after "item no.:"
+    - rows 21-23: permanent instruction in the Remarks area
+    - rows 24-27: optional COGO area-calculation statement
+    - rows 28-33: user's typed remarks
     - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
     checkbox_style_source = ws["C21"]
     measurement_text_style_source = ws["D21"]
-    close_paren_style_source = ws["H21"]
     remarks_label_style_source = ws["B25"]
     remarks_box_style_source = ws["C25"]
     footer_left_style_source = ws["B30"]
@@ -3063,22 +3062,21 @@ def rebuild_bottom_section_layout(ws):
 
     safe_set(ws, "B19", "This is:")
     safe_set(ws, "C19", "☐")
-    safe_set(ws, "D19", "an estimated progress measurement (item no.:")
-    safe_set(ws, "N19", ")")
+    safe_set(ws, "D19", "an estimated progress measurement (item no.: )")
     safe_set(ws, "C20", "☐")
-    safe_set(ws, "D20", "a final field measurement (item no.:")
-    safe_set(ws, "N20", ")")
+    safe_set(ws, "D20", "a final field measurement (item no.: )")
 
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
-    safe_set(ws, "C25", "")
-    safe_set(ws, "C29", "")
+    safe_set(ws, "C24", "")
+    safe_set(ws, "C28", "")
     safe_set(ws, "A34", "")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:G19", "H19:M19", "D20:G20", "H20:M20",
-        "C21:N24", "C25:N28", "C29:N33", "A34:D34", "M34:N34",
+        "D19:N19", "D20:N20",
+        "C21:N23", "C24:N27", "C28:N33",
+        "A34:D34", "M34:N34",
     ]:
         try:
             ws.merge_cells(merge)
@@ -3090,35 +3088,31 @@ def rebuild_bottom_section_layout(ws):
         copy_cell_style(checkbox_style_source, ws[addr])
     for addr in ["D19", "D20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
-        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    for addr in ["N19", "N20"]:
-        copy_cell_style(close_paren_style_source, ws[addr])
-        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    for addr in ["H19", "H20"]:
-        copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
         )
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    for anchor_addr in ["C21", "C25", "C29"]:
+    for anchor_addr in ["C21", "C24", "C28"]:
         anchor = ws[anchor_addr]
         copy_cell_style(remarks_box_style_source, anchor)
         anchor.alignment = Alignment(
             horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False
         )
 
-    # Print the standard instruction directly in the Remarks area.
+    # The permanent instruction remains at the top of the Remarks area.
     ws["C21"].font = make_font_with_size(ws["C21"].font, 10)
+    # COGO starts at the same left edge as typed remarks and sits immediately
+    # below the permanent instruction without overlapping it.
+    ws["C24"].font = make_font_with_size(ws["C24"].font, 10)
 
-    for row in range(21, 25):
+    for row in range(21, 24):
         ws.row_dimensions[row].height = 15
-    for row in range(25, 29):
+    for row in range(24, 28):
         ws.row_dimensions[row].height = 15
-    for row in range(29, 34):
+    for row in range(28, 34):
         ws.row_dimensions[row].height = 15
-    ws["C25"].font = make_font_with_size(ws["C25"].font, 10)
     ws.row_dimensions[34].height = 16
 
     copy_cell_style(footer_left_style_source, ws["A34"])
@@ -3126,20 +3120,49 @@ def rebuild_bottom_section_layout(ws):
     copy_cell_style(footer_right_style_source, ws["M34"])
     ws["M34"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
 
+
+def ensure_contractor_value_area(ws):
+    """Keep the Contractor/Sub label intact and provide a reliable value area at D8:F8."""
+    containing = None
+    for merged_range in list(ws.merged_cells.ranges):
+        if "D8" in merged_range:
+            containing = str(merged_range)
+            break
+
+    # If D8 belongs to a merge whose anchor is not D8, writing to D8 would
+    # overwrite the label-side anchor. Split it and create a dedicated value box.
+    if containing and not containing.startswith("D8:"):
+        try:
+            unmerge_range_keep_style(ws, containing)
+        except Exception:
+            try:
+                ws.unmerge_cells(containing)
+            except Exception:
+                pass
+
+    # Merge a stable contractor entry area only when those cells are free.
+    try:
+        already = any("D8" in r and str(r).startswith("D8:") for r in ws.merged_cells.ranges)
+        if not already:
+            ws.merge_cells("D8:F8")
+    except Exception:
+        pass
+
+
 def clear_exact_idr_values(ws):
     # Header values only - do not clear labels.
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C25", "C29", "H19", "H20", "I19", "I20", "N19", "N20", "A34", "M34",
+        "C21", "C24", "C28", "D19", "D20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
-    # Restore checkboxes and closing parentheses in the moved measurement section.
+    # Restore checkboxes and measurement labels in the moved section.
     safe_set(ws, "C19", "☐")
     safe_set(ws, "C20", "☐")
-    safe_set(ws, "N19", ")")
-    safe_set(ws, "N20", ")")
+    safe_set(ws, "D19", "an estimated progress measurement (item no.: )")
+    safe_set(ws, "D20", "a final field measurement (item no.: )")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
@@ -3161,6 +3184,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         unmerge_range_keep_style(ws, merged)
 
     rebuild_bottom_section_layout(ws)
+    ensure_contractor_value_area(ws)
     clear_exact_idr_values(ws)
 
     report_date = format_report_date(idr_info.get("date"))
@@ -3169,7 +3193,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     # Header/manual fields.
-    safe_set(ws, "D8", idr_info.get("contractor", ""))
+    safe_set(ws, "D8", clean_line(idr_info.get("contractor", "")))
     safe_set(ws, "C10", idr_info.get("weather", ""))
     inspected_by = clean_line(idr_info.get("inspected_by", ""))
     measured_by = clean_line(idr_info.get("measured_by", ""))
@@ -3196,12 +3220,14 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     measurement_type = clean_line(idr_info.get("measurement_type", ""))
     automatic_item_numbers = ", ".join(selected_item_codes(rows))
+    estimated_line = f"an estimated progress measurement (item no.: {automatic_item_numbers if measurement_type == 'Estimated progress measurement' else ''})"
+    final_line = f"a final field measurement (item no.: {automatic_item_numbers if measurement_type == 'Final field measurement' else ''})"
+    safe_set(ws, "D19", estimated_line)
+    safe_set(ws, "D20", final_line)
     if measurement_type == "Estimated progress measurement":
         safe_set(ws, "C19", "☒")
-        safe_set(ws, "H19", automatic_item_numbers)
     elif measurement_type == "Final field measurement":
         safe_set(ws, "C20", "☒")
-        safe_set(ws, "H20", automatic_item_numbers)
 
     # Keep the standard instruction beside the Remarks label. When selected,
     # print the COGO statement next, followed by the user's typed remarks.
@@ -3217,8 +3243,8 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
             "(attached Area Calculation, pointlist, and coordinates measured quantity "
             "compares to plan quantity.)"
         )
-    safe_set(ws, "C25", cogo_statement)
-    safe_set(ws, "C29", clean_line(idr_info.get("remarks", "")))
+    safe_set(ws, "C24", cogo_statement)
+    safe_set(ws, "C28", clean_line(idr_info.get("remarks", "")))
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
@@ -3248,7 +3274,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     ws.row_dimensions[20].height = max(ws.row_dimensions[20].height or 0, 18)
     for remarks_row in range(21, 25):
         ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 17)
-    for remarks_row in range(25, 27):
+    for remarks_row in range(24, 28):
         ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 18)
 
     try:
