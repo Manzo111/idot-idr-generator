@@ -169,6 +169,51 @@ EVIDENCE_BY_EXACT_ITEM_CODE = {
     "25200200": "Potable source",
 }
 
+
+# Section-level evidence table. The first three numeric digits of an IDOT pay
+# item code identify its specification section. These defaults are used whenever
+# the FY2026 guide gives one consistent evidence requirement for that section.
+# Sections with multiple possible requirements continue to use the item-name
+# rules below so that a broad section match does not insert incorrect evidence.
+EVIDENCE_BY_SECTION = {
+    "202": "None",
+    "203": "None",
+    "204": "Soil from outside R.O.W.: Letter of approval from District Materials Engineer",
+    "206": "Approved source & shipment ticket or LIST + TICK",
+    "207": "Approved source & shipment ticket or LIST + TICK",
+    "208": "Approved source & shipment ticket or LIST + TICK",
+    "209": "Approved source & shipment ticket or LIST + TICK",
+    "210": "CERT or LA15",
+    "213": "None",
+    "311": "Approved source & shipment ticket or LIST + TICK",
+    "312": "HMA: DPR + TICK + TEST; CAM II: DPR + TICK + TEST; CAM/PSM: TEST",
+    "351": "Approved source & shipment ticket or LIST + TICK",
+    "353": "DPR + TICK + TEST",
+    "354": "DPR + TICK + TEST",
+    "355": "DPR + TICK + TEST",
+    "356": "DPR + TICK + TEST",
+    "402": "Approved source & shipment ticket or LIST + TICK",
+    "407": "DPR + TICK + TEST",
+    "424": "DPR + TICK + TEST",
+    "481": "Approved source & shipment ticket or LIST + TICK",
+    "482": "DPR + TICK + TEST",
+    "501": "None",
+    "502": "None",
+    "504": "Precast bridge slab: LIST + ILOK; Precast bridge beams: LIST + ILOK; Prestressed bridge beams: ILOK",
+    "505": "Steel: Fabrication Inspector's Release (BBS 59) + CERT; High-strength bolts: CBM or LA15 or ILOK or TEST",
+    "508": "Rebar: LIST + CERT + MARK; Epoxy-coated rebar: LIST + CERT + MARK",
+    "511": "Concrete: DPR + TICK + TEST; Mesh: LIST + CERT",
+    "542": "Cast-in-place: DPR + TICK + TEST; Precast: LIST + MARK",
+    "550": "Concrete: LIST + MARK; Plastic: ILOK or LA15 or TEST; Clay: ILOK or LA15 or TEST",
+    "580": "LA15 or TEST",
+    "606": "DPR + TICK + TEST",
+    "611": "DPR + TICK + TEST",
+    "630": "Rail element: LIST + CERT; Steel post: CERT or LA15; End section: (LIST + CERT) or LA15; Fasteners: (MARK + CERT) or TEST; Wood post: CERT or MARK or LA15",
+    "663": "Dust palliative: TEST; Accelerator: CERT",
+    "664": "CERT or LA15",
+    "665": "CERT or LA15",
+}
+
 # Each tuple is: (section, required description phrases, evidence text).
 # Every phrase in a tuple's phrase list must appear in the normalized item name.
 # More-specific rules are intentionally listed before general rules.
@@ -279,12 +324,25 @@ def get_item_section(item_code):
 
 def get_evidence_of_material_inspection(item_code, item_description):
     code = normalize_pay_item_code(item_code)
+
+    # Exact pay-item exceptions always win.
     if code in EVIDENCE_BY_EXACT_ITEM_CODE:
         return EVIDENCE_BY_EXACT_ITEM_CODE[code]
 
     section = get_item_section(code)
+    if not section:
+        return ""
+
+    # Most sections have one consistent evidence requirement. This allows the
+    # item code alone to populate the field. Example: every 424 item, including
+    # PCC Sidewalk, receives DPR + TICK + TEST.
+    if section in EVIDENCE_BY_SECTION:
+        return EVIDENCE_BY_SECTION[section]
+
+    # Some sections contain materially different item types. For those only,
+    # use the official item description to select the correct requirement.
     description = normalize_evidence_match_text(item_description)
-    if not section or not description:
+    if not description:
         return ""
 
     for rule_section, phrases, evidence in EVIDENCE_RULES:
@@ -2622,7 +2680,7 @@ def build_idr_header_form():
         )
     with cogo_cols[2]:
         st.caption(
-            "When selected, the statement prints directly below the typed remarks on the IDR."
+            "When selected, the statement prints above the typed remarks on the IDR."
         )
 
     return {
@@ -2977,8 +3035,8 @@ def rebuild_bottom_section_layout(ws):
     Rebuild the lower part of the IDR so it matches the paper form:
     - rows 19-20: measurement checkboxes with every item code inside parentheses
     - rows 21-24: permanent instruction in the Remarks area
-    - rows 25-26: user's typed remarks
-    - rows 27-33: optional COGO area-calculation statement
+    - rows 25-28: optional COGO area-calculation statement
+    - rows 29-33: user's typed remarks
     - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -3015,12 +3073,13 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, "C25", "")
+    safe_set(ws, "C29", "")
     safe_set(ws, "A34", "")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
         "D19:G19", "H19:M19", "D20:G20", "H20:M20",
-        "C21:N24", "C25:N26", "C27:N33", "A34:D34", "M34:N34",
+        "C21:N24", "C25:N28", "C29:N33", "A34:D34", "M34:N34",
     ]:
         try:
             ws.merge_cells(merge)
@@ -3044,7 +3103,7 @@ def rebuild_bottom_section_layout(ws):
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    for anchor_addr in ["C21", "C25", "C27"]:
+    for anchor_addr in ["C21", "C25", "C29"]:
         anchor = ws[anchor_addr]
         copy_cell_style(remarks_box_style_source, anchor)
         anchor.alignment = Alignment(
@@ -3056,11 +3115,11 @@ def rebuild_bottom_section_layout(ws):
 
     for row in range(21, 25):
         ws.row_dimensions[row].height = 15
-    for row in range(25, 27):
+    for row in range(25, 29):
         ws.row_dimensions[row].height = 15
-    for row in range(27, 34):
+    for row in range(29, 34):
         ws.row_dimensions[row].height = 15
-    ws["C27"].font = make_font_with_size(ws["C27"].font, 10)
+    ws["C25"].font = make_font_with_size(ws["C25"].font, 10)
     ws.row_dimensions[34].height = 16
 
     copy_cell_style(footer_left_style_source, ws["A34"])
@@ -3073,7 +3132,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C25", "C27", "H19", "H20", "I19", "I20", "N19", "N20", "A34", "M34",
+        "C21", "C25", "C29", "H19", "H20", "I19", "I20", "N19", "N20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
@@ -3145,12 +3204,10 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, "C20", "☒")
         safe_set(ws, "H20", automatic_item_numbers)
 
-    # Keep the standard instruction beside the Remarks label, then print the
-    # user's typed remarks directly underneath it.
+    # Keep the standard instruction beside the Remarks label. When selected,
+    # print the COGO statement next, followed by the user's typed remarks.
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
-    safe_set(ws, "C25", clean_line(idr_info.get("remarks", "")))
-    # Optional COGO area-calculation statement, printed directly below the
-    # user's remarks only when selected on the website.
+    # Optional COGO area-calculation statement, printed above the user's remarks.
     cogo_statement = ""
     if clean_line(idr_info.get("cogo_statement_option", "")) == "Yes":
         cogo_year = clean_line(idr_info.get("cogo_version_year", ""))
@@ -3161,7 +3218,8 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
             "(attached Area Calculation, pointlist, and coordinates measured quantity "
             "compares to plan quantity.)"
         )
-    safe_set(ws, "C27", cogo_statement)
+    safe_set(ws, "C25", cogo_statement)
+    safe_set(ws, "C29", clean_line(idr_info.get("remarks", "")))
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
