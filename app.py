@@ -3109,8 +3109,8 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:G19", "H19:K19",
-        "D20:G20", "H20:K20",
+        "D19:F19", "G19:K19",
+        "D20:F20", "G20:K20",
         "C21:N22", "C23:N24", "C25:N33",
         "A34:D34", "M34:N34",
     ]:
@@ -3122,7 +3122,7 @@ def rebuild_bottom_section_layout(ws):
     copy_cell_style(label_style_source, ws["B19"])
     for addr in ["C19", "C20"]:
         copy_cell_style(checkbox_style_source, ws[addr])
-    for addr in ["D19", "D20", "H19", "H20"]:
+    for addr in ["D19", "D20", "G19", "G20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
@@ -3160,7 +3160,7 @@ def rebuild_bottom_section_layout(ws):
     # column L, stopping before the Posted in Q Book section.
     writing_line = Border(bottom=Side(style="thin", color="000000"))
     for row in (19, 20):
-        for col in range(8, 13):  # H through L
+        for col in range(7, 13):  # G through L
             ws.cell(row=row, column=col).border = writing_line
 
     for row in range(21, 23):
@@ -3210,7 +3210,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C23", "C25", "D19", "H19", "L19", "D20", "H20", "L20", "A34", "M34",
+        "C21", "C23", "C25", "D19", "G19", "L19", "D20", "G20", "L20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
@@ -3218,10 +3218,10 @@ def clear_exact_idr_values(ws):
     safe_set(ws, "C19", "☐")
     safe_set(ws, "C20", "☐")
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
-    safe_set(ws, "H19", "")
+    safe_set(ws, "G19", "")
     safe_set(ws, "L19", ")")
     safe_set(ws, "D20", "a final field measurement (item no.:")
-    safe_set(ws, "H20", "")
+    safe_set(ws, "G20", "")
     safe_set(ws, "L20", ")")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
@@ -3303,14 +3303,14 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     # places the item numbers directly on a real Excel bottom border and extends
     # that border only through column L, immediately before Posted in Q Book.
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
-    safe_set(ws, "H19", estimated_numbers)
+    safe_set(ws, "G19", estimated_numbers)
     safe_set(ws, "L19", ")")
     safe_set(ws, "D20", "a final field measurement (item no.:")
-    safe_set(ws, "H20", final_numbers)
+    safe_set(ws, "G20", final_numbers)
     safe_set(ws, "L20", ")")
 
     # Keep selected item numbers pinned to the left edge of the writing line.
-    for addr in ["H19", "H20"]:
+    for addr in ["G19", "G20"]:
         ws[addr].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
         )
