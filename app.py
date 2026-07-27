@@ -153,6 +153,150 @@ UNIT_WORDS = [
 
 
 # ============================================================
+# FY2026 EVIDENCE OF MATERIAL INSPECTION LOOKUP
+# ============================================================
+
+# The FY2026 Documentation Guide lists evidence requirements primarily by
+# Standard Specifications section and item description, not by every eight-digit
+# contract pay-item code. The matcher therefore uses both:
+#   1. the first three numeric digits of the pay-item code, and
+#   2. the official item description downloaded from IDOT.
+# Exact-code rules take priority where the guide provides a known example.
+EVIDENCE_BY_EXACT_ITEM_CODE = {
+    "20101700": "Potable source",
+    "20200100": "None",
+    "21101505": "None, topsoil taken from within R.O.W.",
+    "25200200": "Potable source",
+}
+
+# Each tuple is: (section, required description phrases, evidence text).
+# Every phrase in a tuple's phrase list must appear in the normalized item name.
+# More-specific rules are intentionally listed before general rules.
+EVIDENCE_RULES = [
+    ("201", ("TREE", "REMOVAL"), "None"),
+    ("201", ("TEMPORARY", "FENCE"), "VISE"),
+    ("201", ("FERTILIZER", "NUTRIENT"), "CERT (bulk) or MARK (bags)"),
+    ("201", ("SUPPLEMENTAL", "WATERING"), "Potable source"),
+    ("202", ("EARTH", "EXCAVATION", "WIDENING"), "None"),
+    ("202", ("ROCK", "EXCAVATION"), "None"),
+    ("202", ("EARTH", "EXCAVATION"), "None"),
+    ("203", ("ROCK", "EXCAVATION", "CHANNEL"), "None"),
+    ("203", ("CHANNEL", "EXCAVATION"), "None"),
+    ("204", ("BORROW", "EXCAVATION"), "Soil from outside R.O.W.: Letter of approval from District Materials Engineer"),
+    ("204", ("FURNISHED", "EXCAVATION"), "Soil from outside R.O.W.: Letter of approval from District Materials Engineer"),
+    ("206", ("GRANULAR", "EMBANKMENT", "SPECIAL"), "Approved source & shipment ticket or LIST + TICK"),
+    ("207", ("POROUS", "GRANULAR", "EMBANKMENT"), "Approved source & shipment ticket or LIST + TICK"),
+    ("208", ("TRENCH", "BACKFILL"), "Approved source & shipment ticket or LIST + TICK"),
+    ("209", ("POROUS", "GRANULAR", "BACKFILL"), "Approved source & shipment ticket or LIST + TICK"),
+    ("210", ("GEOTECHNICAL", "FABRIC"), "CERT or LA15"),
+    ("211", ("TOPSOIL", "FURNISH"), "TEST"),
+    ("211", ("COMPOST", "FURNISH"), "CERT"),
+    ("213", ("EXPLORATION", "TRENCH"), "None"),
+    ("250", ("SEEDING",), "CERT or ILOK or LA15"),
+    ("250", ("AGRICULTURAL", "GROUND", "LIMESTONE"), "Approved source & shipment ticket or LIST + TICK"),
+    ("252", ("AGRICULTURAL", "GROUND", "LIMESTONE"), "Approved source & shipment ticket or LIST + TICK"),
+    ("250", ("FERTILIZER", "NUTRIENT"), "CERT (bulk) or MARK (bags)"),
+    ("252", ("FERTILIZER", "NUTRIENT"), "CERT (bulk) or MARK (bags)"),
+    ("311", ("SUBBASE", "GRANULAR", "MATERIAL"), "Approved source & shipment ticket or LIST + TICK"),
+    ("312", ("STABILIZED", "SUBBASE"), "HMA: DPR + TICK + TEST; CAM II: DPR + TICK + TEST; CAM/PSM: TEST"),
+    ("351", ("AGGREGATE", "BASE", "COURSE"), "Approved source & shipment ticket or LIST + TICK"),
+    ("352", ("PROCESSING", "SOIL", "CEMENT", "BASE"), "TEST"),
+    ("352", ("CEMENT",), "(LIST or TEST) + BOL"),
+    ("353", ("PCC", "BASE", "COURSE"), "DPR + TICK + TEST"),
+    ("354", ("PCC", "BASE", "COURSE", "WIDENING"), "DPR + TICK + TEST"),
+    ("355", ("HMA", "COURSE", "WIDENING"), "DPR + TICK + TEST"),
+    ("356", ("HMA", "BASE", "COURSE", "WIDENING"), "DPR + TICK + TEST"),
+    ("358", ("PREPARATION", "BASE"), "None"),
+    ("358", ("AGGREGATE", "BASE", "REPAIR"), "Approved source & shipment ticket or LIST + TICK"),
+    ("402", ("AGGREGATE", "SURFACE", "COURSE"), "Approved source & shipment ticket or LIST + TICK"),
+    ("403", ("BIT", "MATERIAL", "PRIME", "COAT"), "(LIST or TEST) + BOL"),
+    ("403", ("COVER", "COAT", "AGGREGATE"), "Approved source & shipment ticket or LIST + TICK"),
+    ("406", ("AGGREGATE", "PRIME", "COAT"), "Approved source & shipment ticket or LIST + TICK"),
+    ("406", ("BIT", "MATERIAL", "PRIME", "COAT"), "(LIST or TEST) + BOL"),
+    ("408", ("POLYMERIZED", "PRIME", "COAT"), "(LIST or TEST) + BOL"),
+    ("406", ("MIX", "CRACK", "JOINT"), "DPR + TICK + TEST"),
+    ("406", ("LEVELING", "BINDER"), "DPR + TICK + TEST"),
+    ("406", ("HMA", "BINDER", "COURSE"), "DPR + TICK + TEST"),
+    ("406", ("HMA", "SURFACE", "COURSE"), "DPR + TICK + TEST"),
+    ("407", ("HMA", "PAVEMENT", "FULL", "DEPTH"), "DPR + TICK + TEST"),
+    ("408", ("INCIDENTAL", "HMA", "SURFACING"), "DPR + TICK + TEST"),
+    ("420", ("WELDED", "WIRE", "REINFORCEMENT"), "LIST + CERT"),
+    ("420", ("PROTECTIVE", "COAT"), "LA15 or ILOK or TEST or CBM"),
+    ("420", ("BRIDGE", "APPROACH", "PAVEMENT"), "DPR + TICK + TEST"),
+    ("420", ("PCC", "PAVEMENT"), "DPR + TICK + TEST"),
+    ("421", ("WIDE", "FLANGE", "BEAM", "TERMINAL"), "Concrete: DPR + TICK + TEST; Rebar: LIST + CERT + MARK; Epoxy-coated rebar: LIST + CERT + MARK; Steel beam: BBS 59 + CERT"),
+    ("421", ("PAVEMENT", "REINFORCEMENT"), "LIST + CERT + MARK"),
+    ("421", ("PROTECTIVE", "COAT"), "LA15 or ILOK or TEST or CBM"),
+    ("421", ("CONTINUOUSLY", "REINFORCED", "PCC"), "DPR + TICK + TEST"),
+    ("424", ("PCC", "SIDEWALK"), "DPR + TICK + TEST"),
+    ("481", ("AGGREGATE", "SHOULDER"), "Approved source & shipment ticket or LIST + TICK"),
+    ("482", ("HMA", "SHOULDER"), "DPR + TICK + TEST"),
+    ("501", ("CONCRETE", "REMOVAL"), "None"),
+    ("502", ("STRUCTURE", "EXCAVATION"), "None"),
+    ("503", ("RUBBED", "FINISH"), "None"),
+    ("503", ("CLASS", "MS", "CONCRETE"), "DPR + TICK + TEST"),
+    ("503", ("CONCRETE", "STRUCTURE"), "DPR + TICK + TEST"),
+    ("503", ("CONCRETE", "SUPERSTRUCTURE"), "DPR + TICK + TEST"),
+    ("504", ("PRECAST", "CONCRETE", "BRIDGE", "SLAB"), "Precast bridge slab: LIST + ILOK; Precast bridge beams: LIST + ILOK; Prestressed bridge beams: ILOK"),
+    ("505", ("STRUCTURAL", "STEEL"), "Steel: Fabrication Inspector's Release (BBS 59) + CERT; High-strength bolts: CBM or LA15 or ILOK or TEST"),
+    ("508", ("REINFORCEMENT", "BAR"), "Rebar: LIST + CERT + MARK; Epoxy-coated rebar: LIST + CERT + MARK"),
+    ("509", ("STEEL", "RAILING"), "Steel railing: CBM; Fasteners: CBM or LA15 or ILOK or TEST; Posts/anchors: CERT or LA15"),
+    ("509", ("ALUMINUM", "RAILING"), "Aluminum railing: CERT or LA15; Fasteners: CBM or LA15 or ILOK or TEST; Posts/anchors: CERT or LA15"),
+    ("509", ("PEDESTRIAN", "RAILING"), "CERT or LA15"),
+    ("509", ("BICYCLE", "RAILING"), "CERT or LA15"),
+    ("511", ("SLOPE", "WALL"), "Concrete: DPR + TICK + TEST; Mesh: LIST + CERT"),
+    ("512", ("FURNISHING", "PILE"), "Precast concrete: LIST + ILOK; Prestressed concrete: ILOK; Steel H/metal shell: CERT or LA15 or ILOK; Timber: CERT or MARK or LA15"),
+    ("512", ("DRIVE", "PILE"), "None"),
+    ("542", ("CONCRETE", "COLLAR"), "Cast-in-place: DPR + TICK + TEST; Precast: LIST + MARK"),
+    ("550", ("STORM", "SEWER"), "Concrete: LIST + MARK; Plastic: ILOK or LA15 or TEST; Clay: ILOK or LA15 or TEST"),
+    ("580", ("MEMBRANE", "WATERPROOFING"), "LA15 or TEST"),
+    ("606", ("CONCRETE", "CURB"), "DPR + TICK + TEST"),
+    ("606", ("CONCRETE", "GUTTER"), "DPR + TICK + TEST"),
+    ("606", ("PAVED", "DITCH"), "DPR + TICK + TEST"),
+    ("611", ("CLASS", "SI", "CONCRETE"), "DPR + TICK + TEST"),
+    ("630", ("STEEL", "PLATE", "BEAM", "GUARD", "RAIL"), "Rail element: LIST + CERT; Steel post: CERT or LA15; End section: (LIST + CERT) or LA15; Fasteners: (MARK + CERT) or TEST; Wood post: CERT or MARK or LA15"),
+    ("663", ("CALCIUM", "CHLORIDE"), "Dust palliative: TEST; Accelerator: CERT"),
+    ("664", ("CHAIN", "LINK", "FENCE"), "CERT or LA15"),
+    ("665", ("WOVEN", "WIRE", "FENCE"), "CERT or LA15"),
+    ("780", ("THERMOPLASTIC", "PAVEMENT", "MARKING"), "LA15 or ILOK or CBM"),
+    ("780", ("PREFORMED", "PLASTIC", "PAVEMENT", "MARKING"), "CERT or LA15 or ILOK or CBM"),
+    ("780", ("EPOXY", "PAVEMENT", "MARKING"), "LA15 or CBM"),
+    ("780", ("MODIFIED", "URETHANE", "MARKING"), "LA15 or CBM"),
+]
+
+
+def normalize_evidence_match_text(value):
+    value = clean_line(value).upper()
+    value = value.replace("&", " AND ")
+    value = re.sub(r"[^A-Z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def get_item_section(item_code):
+    digits = re.sub(r"\D", "", clean_line(item_code))
+    return digits[:3] if len(digits) >= 3 else ""
+
+
+def get_evidence_of_material_inspection(item_code, item_description):
+    code = normalize_pay_item_code(item_code)
+    if code in EVIDENCE_BY_EXACT_ITEM_CODE:
+        return EVIDENCE_BY_EXACT_ITEM_CODE[code]
+
+    section = get_item_section(code)
+    description = normalize_evidence_match_text(item_description)
+    if not section or not description:
+        return ""
+
+    for rule_section, phrases, evidence in EVIDENCE_RULES:
+        if section != rule_section:
+            continue
+        if all(normalize_evidence_match_text(phrase) in description for phrase in phrases):
+            return evidence
+
+    return ""
+
+
+# ============================================================
 # BASIC WEB HELPERS
 # ============================================================
 
@@ -2267,7 +2411,7 @@ def clear_idr_row_state():
         for field in [
             "item_code", "item_description", "custom_code", "custom_description",
             "location", "quantity", "unit", "custom_unit", "plan_quantity",
-            "unit_price", "is_custom",
+            "unit_price", "evidence", "is_custom",
         ]:
             st.session_state.pop(row_key(row_index, field), None)
 
@@ -2284,6 +2428,7 @@ def ensure_row_defaults(row_index):
         "custom_unit": "",
         "plan_quantity": "",
         "unit_price": "",
+        "evidence": "",
         "is_custom": False,
     }
     for field, value in defaults.items():
@@ -2296,6 +2441,9 @@ def set_row_from_official_item(row_index, item):
     st.session_state[row_key(row_index, "unit")] = normalize_unit(item.get("unit", ""))
     st.session_state[row_key(row_index, "plan_quantity")] = clean_line(item.get("plan_quantity", ""))
     st.session_state[row_key(row_index, "unit_price")] = clean_line(item.get("unit_price", ""))
+    st.session_state[row_key(row_index, "evidence")] = get_evidence_of_material_inspection(
+        item.get("item_code", ""), item.get("item_description", "")
+    )
     st.session_state[row_key(row_index, "is_custom")] = False
 
 
@@ -2306,6 +2454,7 @@ def on_item_code_change(row_index, pay_items):
         st.session_state[row_key(row_index, "is_custom")] = True
         st.session_state[row_key(row_index, "plan_quantity")] = ""
         st.session_state[row_key(row_index, "unit_price")] = ""
+        st.session_state[row_key(row_index, "evidence")] = ""
         return
     if not code:
         st.session_state[row_key(row_index, "item_description")] = ""
@@ -2326,6 +2475,7 @@ def on_item_description_change(row_index, pay_items):
         st.session_state[row_key(row_index, "is_custom")] = True
         st.session_state[row_key(row_index, "plan_quantity")] = ""
         st.session_state[row_key(row_index, "unit_price")] = ""
+        st.session_state[row_key(row_index, "evidence")] = ""
         return
     if not description:
         st.session_state[row_key(row_index, "item_code")] = ""
@@ -2357,6 +2507,10 @@ def get_row_for_output(row_index):
             "unit": normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), "")),
             "plan_quantity": "",
             "unit_price": "",
+            "evidence": get_evidence_of_material_inspection(
+                st.session_state.get(row_key(row_index, "custom_code"), ""),
+                st.session_state.get(row_key(row_index, "custom_description"), ""),
+            ),
             "is_custom": True,
         }
     return {
@@ -2367,6 +2521,10 @@ def get_row_for_output(row_index):
         "unit": normalize_unit(st.session_state.get(row_key(row_index, "unit"), "")),
         "plan_quantity": clean_line(st.session_state.get(row_key(row_index, "plan_quantity"), "")),
         "unit_price": clean_line(st.session_state.get(row_key(row_index, "unit_price"), "")),
+        "evidence": get_evidence_of_material_inspection(
+            st.session_state.get(row_key(row_index, "item_code"), ""),
+            st.session_state.get(row_key(row_index, "item_description"), ""),
+        ),
         "is_custom": False,
     }
 
@@ -2447,6 +2605,26 @@ def build_idr_header_form():
     with row2[1]:
         remarks = st.text_area("Remarks", height=70, key=header_key("remarks"))
 
+    st.markdown("**COGO area calculation statement**")
+    cogo_cols = st.columns([1.5, 1.0, 3.5])
+    with cogo_cols[0]:
+        cogo_statement_option = st.selectbox(
+            "Include COGO statement",
+            ["No", "Yes"],
+            key=header_key("cogo_statement_option"),
+        )
+    with cogo_cols[1]:
+        cogo_version_year = st.text_input(
+            "Trimble Access version year",
+            key=header_key("cogo_version_year"),
+            disabled=(cogo_statement_option != "Yes"),
+            placeholder="e.g. 2026",
+        )
+    with cogo_cols[2]:
+        st.caption(
+            "When selected, the statement prints directly below the typed remarks on the IDR."
+        )
+
     return {
         "date": idr_date,
         "contractor": contractor,
@@ -2456,6 +2634,8 @@ def build_idr_header_form():
         "calculated_by": calculated_by,
         "measurement_type": measurement_type,
         "remarks": remarks,
+        "cogo_statement_option": cogo_statement_option,
+        "cogo_version_year": cogo_version_year,
     }
 
 
@@ -2474,15 +2654,15 @@ def build_idr_rows_form(pay_items):
         unsafe_allow_html=True,
     )
 
-    header_cols = st.columns([1.05, 0.65, 2.9, 1.9, 0.9, 0.8, 0.85])
-    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Status"]
+    header_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 2.0])
+    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Evidence of Material Inspection"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
     rows = []
     for row_index in range(PDF_ROW_COUNT):
         ensure_row_defaults(row_index)
-        row_cols = st.columns([1.05, 0.65, 2.9, 1.9, 0.9, 0.8, 0.85])
+        row_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 2.0])
 
         current_code = st.session_state.get(row_key(row_index, "item_code"), "")
         current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
@@ -2550,7 +2730,14 @@ def build_idr_rows_form(pay_items):
         row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
         rows.append(row)
         with row_cols[6]:
-            st.markdown(quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")), unsafe_allow_html=True)
+            st.text_area(
+                f"Row {row_index + 1} Evidence of Material Inspection",
+                value=row.get("evidence", ""),
+                height=72,
+                disabled=True,
+                label_visibility="collapsed",
+                key=row_key(row_index, "evidence_display"),
+            )
 
     return rows
 
@@ -2715,6 +2902,38 @@ def increase_entire_form_font_size(ws, points=1.5):
                 pass
 
 
+
+def format_evidence_cells(ws):
+    """Wrap and fit automatically populated evidence text in J13:L18."""
+    for row in range(13, 19):
+        visible_cell_address = f"J{row}"
+        anchor_cell_address = get_merged_anchor_cell(ws, visible_cell_address)
+        anchor_cell = ws[anchor_cell_address]
+        evidence_text = get_text_for_cell(ws, visible_cell_address)
+        current_alignment = copy(anchor_cell.alignment)
+        anchor_cell.alignment = Alignment(
+            horizontal="left",
+            vertical="top",
+            text_rotation=current_alignment.text_rotation,
+            wrap_text=True,
+            shrink_to_fit=False,
+            indent=0,
+            relativeIndent=current_alignment.relativeIndent,
+            justifyLastLine=current_alignment.justifyLastLine,
+            readingOrder=current_alignment.readingOrder,
+        )
+        length = len(clean_line(evidence_text))
+        if length <= 28:
+            size = 9
+        elif length <= 60:
+            size = 8
+        elif length <= 100:
+            size = 7
+        else:
+            size = 6
+        anchor_cell.font = make_font_with_size(anchor_cell.font, size)
+
+
 def prepare_exact_print_layout(wb, ws):
     wb.active = wb.sheetnames.index(ws.title)
     for sheet in wb.worksheets:
@@ -2759,7 +2978,7 @@ def rebuild_bottom_section_layout(ws):
     - rows 19-20: measurement checkboxes with every item code inside parentheses
     - rows 21-24: permanent instruction in the Remarks area
     - rows 25-26: user's typed remarks
-    - rows 27-33: intentionally blank
+    - rows 27-33: optional COGO area-calculation statement
     - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -2840,7 +3059,8 @@ def rebuild_bottom_section_layout(ws):
     for row in range(25, 27):
         ws.row_dimensions[row].height = 15
     for row in range(27, 34):
-        ws.row_dimensions[row].height = 12
+        ws.row_dimensions[row].height = 15
+    ws["C27"].font = make_font_with_size(ws["C27"].font, 10)
     ws.row_dimensions[34].height = 16
 
     copy_cell_style(footer_left_style_source, ws["A34"])
@@ -2929,9 +3149,19 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     # user's typed remarks directly underneath it.
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, "C25", clean_line(idr_info.get("remarks", "")))
-    # Keep the lower portion blank. Do not automatically print item names,
-    # quantities, units, or calculation text beneath the instruction.
-    safe_set(ws, "C27", "")
+    # Optional COGO area-calculation statement, printed directly below the
+    # user's remarks only when selected on the website.
+    cogo_statement = ""
+    if clean_line(idr_info.get("cogo_statement_option", "")) == "Yes":
+        cogo_year = clean_line(idr_info.get("cogo_version_year", ""))
+        version_text = f" {cogo_year}" if cogo_year else ""
+        cogo_statement = (
+            f"Used Cogo Area Calc Tool Trimble Access Version{version_text} "
+            "Area Calculated from a list of points shot around the perimeter "
+            "(attached Area Calculation, pointlist, and coordinates measured quantity "
+            "compares to plan quantity.)"
+        )
+    safe_set(ws, "C27", cogo_statement)
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
@@ -2951,6 +3181,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, f"D{excel_row}", desc)
         safe_set(ws, f"F{excel_row}", clean_line(row.get("location", "")))
         safe_set(ws, f"H{excel_row}", qty_unit)
+        safe_set(ws, f"J{excel_row}", clean_line(row.get("evidence", "")))
 
     # Use more of the page vertically: enlarge the table header and item rows.
     ws.row_dimensions[12].height = max(ws.row_dimensions[12].height or 0, 25)
@@ -2970,6 +3201,11 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     try:
         format_quantity_cells(ws)
+    except Exception:
+        pass
+
+    try:
+        format_evidence_cells(ws)
     except Exception:
         pass
 
