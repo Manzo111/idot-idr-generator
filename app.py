@@ -2414,7 +2414,7 @@ def build_idr_header_form():
             - **Date** → prints in the top-left date box. The dates beside Inspected/Measured/Calculated only print when initials are entered.
             - **Contractor or Sub.** → prints on the Contractor/Subcontractor line.
             - **Weather** → prints on the Weather line.
-            - **Inspected by / Measured by / Calculated by / Checked by** → prints in the signature/initial boxes on the right side of the form.
+            - **Inspected by / Measured by / Calculated by** → prints in the signature/initial boxes on the right side of the form.
             - **This is** → checks either Estimated Progress Measurement or Final Field Measurement.
             - **Item no.** → all selected pay-item codes print automatically beside the selected measurement checkbox.
             - **Remarks** → prints in the expanded Remarks box under the measurement section.
@@ -2422,7 +2422,7 @@ def build_idr_header_form():
         )
 
     st.markdown("**Top form fields**")
-    row1 = st.columns([1.0, 2.0, 1.4, 1.1, 1.1, 1.1, 1.1])
+    row1 = st.columns([1.0, 2.0, 1.4, 1.1, 1.1, 1.1])
     with row1[0]:
         idr_date = st.date_input("Date", value=get_today_default(), key=header_key("date"))
     with row1[1]:
@@ -2435,9 +2435,6 @@ def build_idr_header_form():
         measured_by = st.text_input("Measured by", key=header_key("measured_by"))
     with row1[5]:
         calculated_by = st.text_input("Calculated by", key=header_key("calculated_by"))
-    with row1[6]:
-        checked_by = st.text_input("Checked by", key=header_key("checked_by"))
-
     st.markdown("**Measurement and remarks fields**")
     row2 = st.columns([1.4, 4.6])
     with row2[0]:
@@ -2457,7 +2454,6 @@ def build_idr_header_form():
         "inspected_by": inspected_by,
         "measured_by": measured_by,
         "calculated_by": calculated_by,
-        "checked_by": checked_by,
         "measurement_type": measurement_type,
         "remarks": remarks,
     }
@@ -2707,9 +2703,9 @@ def unmerge_range_keep_style(ws, range_coord):
             cell.protection = copy(saved["protection"])
 
 
-def increase_entire_form_font_size(ws, points=1):
+def increase_entire_form_font_size(ws, points=1.5):
     """Increase every visible font in the printable IDR area by the requested points."""
-    for row in ws.iter_rows(min_row=2, max_row=40, min_col=1, max_col=14):
+    for row in ws.iter_rows(min_row=2, max_row=34, min_col=1, max_col=14):
         for cell in row:
             try:
                 current_size = cell.font.sz
@@ -2725,7 +2721,7 @@ def prepare_exact_print_layout(wb, ws):
         if sheet.title != ws.title:
             sheet.sheet_state = "hidden"
 
-    ws.print_area = "A2:N40"
+    ws.print_area = "A2:N34"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
@@ -2763,8 +2759,8 @@ def rebuild_bottom_section_layout(ws):
     - rows 19-20: measurement checkboxes with every item code inside parentheses
     - rows 21-24: permanent instruction in the Remarks area
     - rows 25-26: user's typed remarks
-    - rows 27-39: intentionally blank
-    - row 40: printed date and revision footer
+    - rows 27-33: intentionally blank
+    - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
     checkbox_style_source = ws["C21"]
@@ -2776,7 +2772,7 @@ def rebuild_bottom_section_layout(ws):
     footer_right_style_source = ws["N30"]
 
     for merged_range in list(ws.merged_cells.ranges):
-        if merged_range.min_row <= 40 and merged_range.max_row >= 19:
+        if merged_range.min_row <= 34 and merged_range.max_row >= 19:
             try:
                 unmerge_range_keep_style(ws, str(merged_range))
             except Exception:
@@ -2785,7 +2781,7 @@ def rebuild_bottom_section_layout(ws):
                 except Exception:
                     pass
 
-    for row in range(19, 41):
+    for row in range(19, 35):
         for col in range(1, 15):
             ws.cell(row=row, column=col).value = None
 
@@ -2800,12 +2796,12 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, "C25", "")
-    safe_set(ws, "A40", "")
-    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
+    safe_set(ws, "A34", "")
+    safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
         "D19:G19", "H19:M19", "D20:G20", "H20:M20",
-        "C21:N24", "C25:N26", "C27:N39", "A40:D40", "M40:N40",
+        "C21:N24", "C25:N26", "C27:N33", "A34:D34", "M34:N34",
     ]:
         try:
             ws.merge_cells(merge)
@@ -2843,21 +2839,21 @@ def rebuild_bottom_section_layout(ws):
         ws.row_dimensions[row].height = 15
     for row in range(25, 27):
         ws.row_dimensions[row].height = 15
-    for row in range(27, 40):
-        ws.row_dimensions[row].height = 15
-    ws.row_dimensions[40].height = 14
+    for row in range(27, 34):
+        ws.row_dimensions[row].height = 12
+    ws.row_dimensions[34].height = 16
 
-    copy_cell_style(footer_left_style_source, ws["A40"])
-    ws["A40"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    copy_cell_style(footer_right_style_source, ws["M40"])
-    ws["M40"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+    copy_cell_style(footer_left_style_source, ws["A34"])
+    ws["A34"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    copy_cell_style(footer_right_style_source, ws["M34"])
+    ws["M34"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
 
 def clear_exact_idr_values(ws):
     # Header values only - do not clear labels.
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C25", "C27", "H19", "H20", "I19", "I20", "N19", "N20", "A40", "M40",
+        "C21", "C25", "C27", "H19", "H20", "I19", "I20", "N19", "N20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
@@ -2866,7 +2862,7 @@ def clear_exact_idr_values(ws):
     safe_set(ws, "C20", "☐")
     safe_set(ws, "N19", ")")
     safe_set(ws, "N20", ")")
-    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
+    safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
         for col in ["B", "C", "D", "F", "H", "I", "J", "M"]:
@@ -2891,8 +2887,8 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     report_date = format_report_date(idr_info.get("date"))
     safe_set(ws, "C6", report_date)
-    safe_set(ws, "A40", f"Printed {report_date}")
-    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
+    safe_set(ws, "A34", f"Printed {report_date}")
+    safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     # Header/manual fields.
     safe_set(ws, "D8", idr_info.get("contractor", ""))
@@ -2907,9 +2903,9 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     safe_set(ws, "H7", report_date if measured_by else "")
     safe_set(ws, "G8", calculated_by)
     safe_set(ws, "H8", report_date if calculated_by else "")
-    checked_by = clean_line(idr_info.get("checked_by", ""))
-    safe_set(ws, "G9", checked_by)
-    safe_set(ws, "H9", report_date if checked_by else "")
+    # Checked-by is intentionally not collected on the website.
+    safe_set(ws, "G9", "")
+    safe_set(ws, "H9", "")
 
     # Job metadata from IDOT.
     safe_set(ws, "L2", metadata.get("county", ""))
@@ -2956,6 +2952,17 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, f"F{excel_row}", clean_line(row.get("location", "")))
         safe_set(ws, f"H{excel_row}", qty_unit)
 
+    # Use more of the page vertically: enlarge the table header and item rows.
+    ws.row_dimensions[12].height = max(ws.row_dimensions[12].height or 0, 25)
+    for table_row in range(13, 19):
+        ws.row_dimensions[table_row].height = max(ws.row_dimensions[table_row].height or 0, 22)
+    ws.row_dimensions[19].height = max(ws.row_dimensions[19].height or 0, 18)
+    ws.row_dimensions[20].height = max(ws.row_dimensions[20].height or 0, 18)
+    for remarks_row in range(21, 25):
+        ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 17)
+    for remarks_row in range(25, 27):
+        ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 18)
+
     try:
         format_item_description_cells(ws)
     except Exception:
@@ -2967,7 +2974,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         pass
 
     # The prior PDF rendered the entire form one point too small.
-    increase_entire_form_font_size(ws, points=1)
+    increase_entire_form_font_size(ws, points=1.5)
 
     prepare_exact_print_layout(wb, ws)
 
