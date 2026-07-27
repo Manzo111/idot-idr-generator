@@ -1619,7 +1619,9 @@ def rebuild_bottom_section_layout(ws):
     # Keep both measurement descriptions at exactly the same font size.
     # Without this, Excel/LibreOffice can shrink the longer estimated-progress
     # label more than the final-measurement label.
-    shared_measurement_font = copy(measurement_text_style_source.font)
+    shared_measurement_font = make_font_with_size(
+        copy(measurement_text_style_source.font), 9
+    )
     for addr in ['D19', 'D20']:
         ws[addr].font = copy(shared_measurement_font)
         ws[addr].alignment = Alignment(
