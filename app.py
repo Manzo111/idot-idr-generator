@@ -2382,14 +2382,13 @@ STANDARD_REMARKS_INSTRUCTION = (
 
 
 def selected_item_codes(rows):
-    """Return the unique, nonblank item codes currently shown on the IDR."""
+    """Return every nonblank item code shown on the IDR, including repeats."""
     codes = []
     for row in rows or []:
         code = normalize_pay_item_code(row.get("item_code", ""))
         if not code or code == "CUSTOM / MANUAL":
             continue
-        if code not in codes:
-            codes.append(code)
+        codes.append(code)
     return codes
 
 
@@ -2784,6 +2783,18 @@ def unmerge_range_keep_style(ws, range_coord):
             cell.protection = copy(saved["protection"])
 
 
+def increase_entire_form_font_size(ws, points=1):
+    """Increase every visible font in the printable IDR area by the requested points."""
+    for row in ws.iter_rows(min_row=2, max_row=40, min_col=1, max_col=14):
+        for cell in row:
+            try:
+                current_size = cell.font.sz
+                if current_size is not None:
+                    cell.font = make_font_with_size(cell.font, float(current_size) + points)
+            except Exception:
+                pass
+
+
 def prepare_exact_print_layout(wb, ws):
     wb.active = wb.sheetnames.index(ws.title)
     for sheet in wb.worksheets:
@@ -2817,10 +2828,10 @@ def copy_cell_style(source_cell, target_cell):
 def rebuild_bottom_section_layout(ws):
     """
     Rebuild the lower part of the IDR so it matches the paper form:
-    - rows 19-20: measurement checkboxes and automatic item-code list
-    - rows 21-22: remarks text
-    - rows 23-24: permanent remarks instruction directly below Remarks
-    - rows 25-39: automatic item-code/name/calculation block
+    - rows 19-20: measurement checkboxes with every item code inside parentheses
+    - rows 21-24: user Remarks area
+    - rows 25-26: permanent instruction directly below Remarks
+    - rows 27-39: intentionally blank
     - row 40: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -2832,7 +2843,6 @@ def rebuild_bottom_section_layout(ws):
     footer_left_style_source = ws["B30"]
     footer_right_style_source = ws["N30"]
 
-    # Remove every merge that can overlap the rebuilt lower section.
     for merged_range in list(ws.merged_cells.ranges):
         if merged_range.min_row <= 40 and merged_range.max_row >= 19:
             try:
@@ -2850,21 +2860,20 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "B19", "This is:")
     safe_set(ws, "C19", "☐")
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
-    safe_set(ws, "H19", ")")
+    safe_set(ws, "N19", ")")
     safe_set(ws, "C20", "☐")
     safe_set(ws, "D20", "a final field measurement (item no.:")
-    safe_set(ws, "H20", ")")
+    safe_set(ws, "N20", ")")
 
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", "")
-    safe_set(ws, "C23", STANDARD_REMARKS_INSTRUCTION)
-    safe_set(ws, "C25", "")
+    safe_set(ws, "C25", STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, "A40", "")
     safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:G19", "I19:N19", "D20:G20", "I20:N20",
-        "C21:N22", "C23:N24", "C25:N39", "A40:D40", "M40:N40",
+        "D19:H19", "I19:M19", "D20:H20", "I20:M20",
+        "C21:N24", "C25:N26", "C27:N39", "A40:D40", "M40:N40",
     ]:
         try:
             ws.merge_cells(merge)
@@ -2877,31 +2886,32 @@ def rebuild_bottom_section_layout(ws):
     for addr in ["D19", "D20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    for addr in ["H19", "H20"]:
+    for addr in ["N19", "N20"]:
         copy_cell_style(close_paren_style_source, ws[addr])
+        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
     for addr in ["I19", "I20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
-        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, shrink_to_fit=True)
+        ws[addr].alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
+        )
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    for anchor_addr in ["C21", "C23", "C25"]:
+    for anchor_addr in ["C21", "C25", "C27"]:
         anchor = ws[anchor_addr]
         copy_cell_style(remarks_box_style_source, anchor)
-        anchor.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False)
+        anchor.alignment = Alignment(
+            horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False
+        )
 
-    # Match the paper IDR: the instruction is normal readable text directly
-    # beneath Remarks, and the calculation block begins immediately below it.
-    ws["C23"].font = make_font_with_size(ws["C23"].font, 10)
+    # The instruction must sit below the full Remarks box, never underneath it.
     ws["C25"].font = make_font_with_size(ws["C25"].font, 10)
 
-    # Keep the bottom section compact so the instruction does not drift toward
-    # the bottom of the page and the calculations sit where they do on the form.
-    for row in range(21, 23):
+    for row in range(21, 25):
         ws.row_dimensions[row].height = 15
-    for row in range(23, 25):
+    for row in range(25, 27):
         ws.row_dimensions[row].height = 15
-    for row in range(25, 40):
+    for row in range(27, 40):
         ws.row_dimensions[row].height = 15
     ws.row_dimensions[40].height = 14
 
@@ -2910,21 +2920,20 @@ def rebuild_bottom_section_layout(ws):
     copy_cell_style(footer_right_style_source, ws["M40"])
     ws["M40"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
 
-
 def clear_exact_idr_values(ws):
     # Header values only - do not clear labels.
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C23", "C25", "I19", "I20", "H19", "H20", "A40", "M40",
+        "C21", "C25", "C27", "I19", "I20", "N19", "N20", "A40", "M40",
     ]:
         safe_set(ws, cell, "")
 
     # Restore checkboxes and closing parentheses in the moved measurement section.
     safe_set(ws, "C19", "☐")
     safe_set(ws, "C20", "☐")
-    safe_set(ws, "H19", ")")
-    safe_set(ws, "H20", ")")
+    safe_set(ws, "N19", ")")
+    safe_set(ws, "N20", ")")
     safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
@@ -2984,14 +2993,10 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, "I20", automatic_item_numbers)
 
     safe_set(ws, "C21", build_full_remarks(idr_info.get("remarks", "")))
-    safe_set(ws, "C23", STANDARD_REMARKS_INSTRUCTION)
-
-    # The paper example includes this lower calculation block only when the IDR
-    # is identified as an estimated or final measurement.
-    if measurement_type in ["Estimated progress measurement", "Final field measurement"]:
-        safe_set(ws, "C25", build_measurement_calculations(rows))
-    else:
-        safe_set(ws, "C25", "")
+    safe_set(ws, "C25", STANDARD_REMARKS_INSTRUCTION)
+    # Keep the lower portion blank. Do not automatically print item names,
+    # quantities, units, or calculation text beneath the instruction.
+    safe_set(ws, "C27", "")
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
@@ -3021,6 +3026,9 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         format_quantity_cells(ws)
     except Exception:
         pass
+
+    # The prior PDF rendered the entire form one point too small.
+    increase_entire_form_font_size(ws, points=1)
 
     prepare_exact_print_layout(wb, ws)
 
