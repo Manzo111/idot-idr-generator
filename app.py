@@ -2266,7 +2266,7 @@ def clear_idr_row_state():
     for row_index in range(PDF_ROW_COUNT):
         for field in [
             "item_code", "item_description", "custom_code", "custom_description",
-            "location", "quantity", "calculation", "unit", "custom_unit", "plan_quantity",
+            "location", "quantity", "unit", "custom_unit", "plan_quantity",
             "unit_price", "is_custom",
         ]:
             st.session_state.pop(row_key(row_index, field), None)
@@ -2280,7 +2280,6 @@ def ensure_row_defaults(row_index):
         "custom_description": "",
         "location": "",
         "quantity": "",
-        "calculation": "",
         "unit": "",
         "custom_unit": "",
         "plan_quantity": "",
@@ -2355,7 +2354,6 @@ def get_row_for_output(row_index):
             "item_description": clean_line(st.session_state.get(row_key(row_index, "custom_description"), "")),
             "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
             "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
-            "calculation": clean_line(st.session_state.get(row_key(row_index, "calculation"), "")),
             "unit": normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), "")),
             "plan_quantity": "",
             "unit_price": "",
@@ -2366,7 +2364,6 @@ def get_row_for_output(row_index):
         "item_description": clean_line(st.session_state.get(row_key(row_index, "item_description"), "")),
         "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
         "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
-        "calculation": clean_line(st.session_state.get(row_key(row_index, "calculation"), "")),
         "unit": normalize_unit(st.session_state.get(row_key(row_index, "unit"), "")),
         "plan_quantity": clean_line(st.session_state.get(row_key(row_index, "plan_quantity"), "")),
         "unit_price": clean_line(st.session_state.get(row_key(row_index, "unit_price"), "")),
@@ -2392,72 +2389,6 @@ def selected_item_codes(rows):
     return codes
 
 
-def parse_dimension_calculation(text):
-    """
-    Convert entries such as "6.5 ft x 2 ft" into
-    "6.5ft x 2ft = 13 SQFT". Multiple expressions may be separated by commas,
-    semicolons, or new lines.
-    """
-    text = clean_line(text)
-    if not text:
-        return [], None
-
-    pattern = re.compile(
-        r"(?P<a>\d+(?:\.\d+)?)\s*(?:ft|foot|feet|')?\s*[x×*]\s*"
-        r"(?P<b>\d+(?:\.\d+)?)\s*(?:ft|foot|feet|')?",
-        re.IGNORECASE,
-    )
-
-    calculations = []
-    total = 0.0
-    for match in pattern.finditer(text):
-        a = float(match.group("a"))
-        b = float(match.group("b"))
-        area = a * b
-        total += area
-        calculations.append(
-            f"{a:g}ft x {b:g}ft = {area:g} SQFT"
-        )
-
-    return calculations, total if calculations else None
-
-
-def build_measurement_calculations(rows):
-    """Build the lower calculation block in the same style as the paper IDR."""
-    blocks = []
-
-    for row in rows or []:
-        code = normalize_pay_item_code(row.get("item_code", ""))
-        description = clean_line(row.get("item_description", ""))
-        quantity = clean_line(row.get("quantity", ""))
-        unit = normalize_unit(row.get("unit", ""))
-        calculation_text = clean_line(row.get("calculation", ""))
-
-        if code == "CUSTOM / MANUAL":
-            code = ""
-        if description == "Custom / Manual":
-            description = ""
-        if not code and not description:
-            continue
-
-        title = clean_line(f"{code} {description}")
-        lines = [title]
-
-        dimension_lines, dimension_total = parse_dimension_calculation(calculation_text)
-        if dimension_lines:
-            lines.extend(dimension_lines)
-            if len(dimension_lines) > 1:
-                lines.append(f"TOTAL = {dimension_total:g} SQFT")
-        elif calculation_text:
-            lines.append(calculation_text)
-        elif quantity or unit:
-            lines.append(clean_line(f"{quantity} {unit}"))
-
-        blocks.append("\n".join(lines))
-
-    return "\n\n".join(blocks)
-
-
 def build_full_remarks(user_remarks):
     """Keep user remarks separate from the permanently printed instruction."""
     return clean_line(user_remarks)
@@ -2480,7 +2411,7 @@ def build_idr_header_form():
     with st.expander("Show field guide", expanded=False):
         st.markdown(
             """
-            - **Date** → prints in the top-left date box and also fills the date boxes beside Inspected/Measured/Calculated/Checked.
+            - **Date** → prints in the top-left date box. The dates beside Inspected/Measured/Calculated only print when initials are entered.
             - **Contractor or Sub.** → prints on the Contractor/Subcontractor line.
             - **Weather** → prints on the Weather line.
             - **Inspected by / Measured by / Calculated by / Checked by** → prints in the signature/initial boxes on the right side of the form.
@@ -2547,15 +2478,15 @@ def build_idr_rows_form(pay_items):
         unsafe_allow_html=True,
     )
 
-    header_cols = st.columns([1.05, 0.65, 2.6, 1.8, 0.9, 1.5, 0.75, 0.85])
-    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Calculation / Dimensions", "Unit", "Status"]
+    header_cols = st.columns([1.05, 0.65, 2.9, 1.9, 0.9, 0.8, 0.85])
+    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Status"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
     rows = []
     for row_index in range(PDF_ROW_COUNT):
         ensure_row_defaults(row_index)
-        row_cols = st.columns([1.05, 0.65, 2.6, 1.8, 0.9, 1.5, 0.75, 0.85])
+        row_cols = st.columns([1.05, 0.65, 2.9, 1.9, 0.9, 0.8, 0.85])
 
         current_code = st.session_state.get(row_key(row_index, "item_code"), "")
         current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
@@ -2607,13 +2538,6 @@ def build_idr_rows_form(pay_items):
         with row_cols[4]:
             st.text_input(f"Row {row_index + 1} Quantity", key=row_key(row_index, "quantity"), label_visibility="collapsed")
         with row_cols[5]:
-            st.text_input(
-                f"Row {row_index + 1} Calculation / Dimensions",
-                key=row_key(row_index, "calculation"),
-                placeholder="Example: 6.5 ft x 2 ft",
-                label_visibility="collapsed",
-            )
-        with row_cols[6]:
             if is_custom:
                 st.text_input(
                     f"Row {row_index + 1} Unit",
@@ -2629,7 +2553,7 @@ def build_idr_rows_form(pay_items):
         row = get_row_for_output(row_index)
         row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
         rows.append(row)
-        with row_cols[7]:
+        with row_cols[6]:
             st.markdown(quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")), unsafe_allow_html=True)
 
     return rows
@@ -2965,12 +2889,16 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     # Header/manual fields.
     safe_set(ws, "D8", idr_info.get("contractor", ""))
     safe_set(ws, "C10", idr_info.get("weather", ""))
-    safe_set(ws, "G6", idr_info.get("inspected_by", ""))
-    safe_set(ws, "H6", report_date)
-    safe_set(ws, "G7", idr_info.get("measured_by", ""))
-    safe_set(ws, "H7", report_date)
-    safe_set(ws, "G8", idr_info.get("calculated_by", ""))
-    safe_set(ws, "H8", report_date)
+    inspected_by = clean_line(idr_info.get("inspected_by", ""))
+    measured_by = clean_line(idr_info.get("measured_by", ""))
+    calculated_by = clean_line(idr_info.get("calculated_by", ""))
+
+    safe_set(ws, "G6", inspected_by)
+    safe_set(ws, "H6", report_date if inspected_by else "")
+    safe_set(ws, "G7", measured_by)
+    safe_set(ws, "H7", report_date if measured_by else "")
+    safe_set(ws, "G8", calculated_by)
+    safe_set(ws, "H8", report_date if calculated_by else "")
     safe_set(ws, "G9", idr_info.get("checked_by", ""))
     safe_set(ws, "H9", report_date)
 
