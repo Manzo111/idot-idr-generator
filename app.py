@@ -2830,7 +2830,8 @@ def rebuild_bottom_section_layout(ws):
     Rebuild the lower part of the IDR so it matches the paper form:
     - rows 19-20: measurement checkboxes with every item code inside parentheses
     - rows 21-24: permanent instruction in the Remarks area
-    - rows 25-39: intentionally blank
+    - rows 25-26: user's typed remarks
+    - rows 27-39: intentionally blank
     - row 40: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -2991,9 +2992,10 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, "C20", "☒")
         safe_set(ws, "I20", automatic_item_numbers)
 
-    # The standard instruction replaces typed remarks on the printed IDR.
+    # Keep the standard instruction beside the Remarks label, then print the
+    # user's typed remarks directly underneath it.
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
-    safe_set(ws, "C25", "")
+    safe_set(ws, "C25", clean_line(idr_info.get("remarks", "")))
     # Keep the lower portion blank. Do not automatically print item names,
     # quantities, units, or calculation text beneath the instruction.
     safe_set(ws, "C27", "")
