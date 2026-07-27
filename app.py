@@ -1595,16 +1595,18 @@ def rebuild_bottom_section_layout(ws):
             ws.cell(row=row, column=col).value = None
     safe_set(ws, 'B19', 'This is:')
     safe_set(ws, 'C19', '☐')
-    safe_set(ws, 'D19', 'an estimated progress measurement (item no.: )')
+    safe_set(ws, 'D19', 'an estimated progress measurement (item no.:')
+    safe_set(ws, 'E19', '')
     safe_set(ws, 'C20', '☐')
-    safe_set(ws, 'D20', 'a final field measurement (item no.: )')
+    safe_set(ws, 'D20', 'a final field measurement (item no.:')
+    safe_set(ws, 'E20', '')
     safe_set(ws, 'B21', 'Remarks:')
     safe_set(ws, 'C21', STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, 'C23', '')
     safe_set(ws, 'C25', '')
     safe_set(ws, 'A34', '')
     safe_set(ws, 'M34', 'BC 628 (Rev. 8/04)')
-    for merge in ['D19:E19', 'F19:K19', 'D20:E20', 'F20:K20', 'C21:N22', 'C23:N24', 'C25:N33', 'A34:D34', 'M34:N34']:
+    for merge in ['F19:K19', 'F20:K20', 'C21:N22', 'C23:N24', 'C25:N33', 'A34:D34', 'M34:N34']:
         try:
             ws.merge_cells(merge)
         except Exception:
@@ -1612,7 +1614,7 @@ def rebuild_bottom_section_layout(ws):
     copy_cell_style(label_style_source, ws['B19'])
     for addr in ['C19', 'C20']:
         copy_cell_style(checkbox_style_source, ws[addr])
-    for addr in ['D19', 'D20', 'F19', 'F20']:
+    for addr in ['D19', 'E19', 'D20', 'E20', 'F19', 'F20']:
         copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(horizontal='left', vertical='center', wrap_text=False, shrink_to_fit=True)
 
@@ -1680,14 +1682,16 @@ def ensure_contractor_value_area(ws):
         pass
 
 def clear_exact_idr_values(ws):
-    for cell in ['C6', 'D8', 'C10', 'G6', 'H6', 'G7', 'H7', 'G8', 'H8', 'G9', 'H9', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'L8', 'C21', 'C23', 'C25', 'D19', 'F19', 'L19', 'D20', 'F20', 'L20', 'A34', 'M34']:
+    for cell in ['C6', 'D8', 'C10', 'G6', 'H6', 'G7', 'H7', 'G8', 'H8', 'G9', 'H9', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'L8', 'C21', 'C23', 'C25', 'D19', 'E19', 'F19', 'L19', 'D20', 'E20', 'F20', 'L20', 'A34', 'M34']:
         safe_set(ws, cell, '')
     safe_set(ws, 'C19', '☐')
     safe_set(ws, 'C20', '☐')
     safe_set(ws, 'D19', 'an estimated progress measurement (item no.:')
+    safe_set(ws, 'E19', '')
     safe_set(ws, 'F19', '')
     safe_set(ws, 'L19', ')')
     safe_set(ws, 'D20', 'a final field measurement (item no.:')
+    safe_set(ws, 'E20', '')
     safe_set(ws, 'F20', '')
     safe_set(ws, 'L20', ')')
     safe_set(ws, 'M34', 'BC 628 (Rev. 8/04)')
@@ -1743,9 +1747,11 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     estimated_numbers = automatic_item_numbers if measurement_type == 'Estimated progress measurement' else ''
     final_numbers = automatic_item_numbers if measurement_type == 'Final field measurement' else ''
     safe_set(ws, 'D19', 'an estimated progress measurement (item no.:')
+    safe_set(ws, 'E19', '')
     safe_set(ws, 'F19', estimated_numbers)
     safe_set(ws, 'L19', ')')
     safe_set(ws, 'D20', 'a final field measurement (item no.:')
+    safe_set(ws, 'E20', '')
     safe_set(ws, 'F20', final_numbers)
     safe_set(ws, 'L20', ')')
     for addr in ['F19', 'F20']:
