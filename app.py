@@ -1649,7 +1649,7 @@ def rebuild_bottom_section_layout(ws):
             ws.cell(row=row, column=col).border = Border()
     writing_line = Border(bottom=Side(style='thin', color='000000'))
     for row in (19, 20):
-        for col in range(7, 13):
+        for col in range(6, 13):
             ws.cell(row=row, column=col).border = writing_line
     for row in range(21, 23):
         ws.row_dimensions[row].height = 15
