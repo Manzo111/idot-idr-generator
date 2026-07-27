@@ -2829,9 +2829,8 @@ def rebuild_bottom_section_layout(ws):
     """
     Rebuild the lower part of the IDR so it matches the paper form:
     - rows 19-20: measurement checkboxes with every item code inside parentheses
-    - rows 21-24: user Remarks area
-    - rows 25-26: permanent instruction directly below Remarks
-    - rows 27-39: intentionally blank
+    - rows 21-24: permanent instruction in the Remarks area
+    - rows 25-39: intentionally blank
     - row 40: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -2866,8 +2865,8 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "N20", ")")
 
     safe_set(ws, "B21", "Remarks:")
-    safe_set(ws, "C21", "")
-    safe_set(ws, "C25", STANDARD_REMARKS_INSTRUCTION)
+    safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
+    safe_set(ws, "C25", "")
     safe_set(ws, "A40", "")
     safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
@@ -2904,8 +2903,8 @@ def rebuild_bottom_section_layout(ws):
             horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False
         )
 
-    # The instruction must sit below the full Remarks box, never underneath it.
-    ws["C25"].font = make_font_with_size(ws["C25"].font, 10)
+    # Print the standard instruction directly in the Remarks area.
+    ws["C21"].font = make_font_with_size(ws["C21"].font, 10)
 
     for row in range(21, 25):
         ws.row_dimensions[row].height = 15
@@ -2992,8 +2991,9 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
         safe_set(ws, "C20", "☒")
         safe_set(ws, "I20", automatic_item_numbers)
 
-    safe_set(ws, "C21", build_full_remarks(idr_info.get("remarks", "")))
-    safe_set(ws, "C25", STANDARD_REMARKS_INSTRUCTION)
+    # The standard instruction replaces typed remarks on the printed IDR.
+    safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
+    safe_set(ws, "C25", "")
     # Keep the lower portion blank. Do not automatically print item names,
     # quantities, units, or calculation text beneath the instruction.
     safe_set(ws, "C27", "")
