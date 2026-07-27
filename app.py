@@ -2731,10 +2731,18 @@ def prepare_exact_print_layout(wb, ws):
     ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
-    ws.page_margins.left = 0.25
-    ws.page_margins.right = 0.25
-    ws.page_margins.top = 0.25
-    ws.page_margins.bottom = 0.25
+    # Center the printable form on the physical page. LibreOffice otherwise
+    # tends to anchor the fitted print area slightly toward the left edge.
+    ws.print_options.horizontalCentered = True
+    ws.print_options.verticalCentered = False
+
+    # Use smaller, equal margins. Because the sheet is still fitted to one
+    # landscape page, the extra printable width makes the entire form larger
+    # while keeping equal whitespace on the left and right.
+    ws.page_margins.left = 0.10
+    ws.page_margins.right = 0.10
+    ws.page_margins.top = 0.18
+    ws.page_margins.bottom = 0.18
     ws.page_margins.header = 0
     ws.page_margins.footer = 0
 
@@ -2796,7 +2804,7 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:H19", "I19:M19", "D20:H20", "I20:M20",
+        "D19:G19", "H19:M19", "D20:G20", "H20:M20",
         "C21:N24", "C25:N26", "C27:N39", "A40:D40", "M40:N40",
     ]:
         try:
@@ -2813,7 +2821,7 @@ def rebuild_bottom_section_layout(ws):
     for addr in ["N19", "N20"]:
         copy_cell_style(close_paren_style_source, ws[addr])
         ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    for addr in ["I19", "I20"]:
+    for addr in ["H19", "H20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
@@ -2849,7 +2857,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C25", "C27", "I19", "I20", "N19", "N20", "A40", "M40",
+        "C21", "C25", "C27", "H19", "H20", "I19", "I20", "N19", "N20", "A40", "M40",
     ]:
         safe_set(ws, cell, "")
 
@@ -2899,8 +2907,9 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     safe_set(ws, "H7", report_date if measured_by else "")
     safe_set(ws, "G8", calculated_by)
     safe_set(ws, "H8", report_date if calculated_by else "")
-    safe_set(ws, "G9", idr_info.get("checked_by", ""))
-    safe_set(ws, "H9", report_date)
+    checked_by = clean_line(idr_info.get("checked_by", ""))
+    safe_set(ws, "G9", checked_by)
+    safe_set(ws, "H9", report_date if checked_by else "")
 
     # Job metadata from IDOT.
     safe_set(ws, "L2", metadata.get("county", ""))
@@ -2915,10 +2924,10 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     automatic_item_numbers = ", ".join(selected_item_codes(rows))
     if measurement_type == "Estimated progress measurement":
         safe_set(ws, "C19", "☒")
-        safe_set(ws, "I19", automatic_item_numbers)
+        safe_set(ws, "H19", automatic_item_numbers)
     elif measurement_type == "Final field measurement":
         safe_set(ws, "C20", "☒")
-        safe_set(ws, "I20", automatic_item_numbers)
+        safe_set(ws, "H20", automatic_item_numbers)
 
     # Keep the standard instruction beside the Remarks label, then print the
     # user's typed remarks directly underneath it.
