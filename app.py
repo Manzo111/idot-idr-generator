@@ -2565,10 +2565,9 @@ def get_row_for_output(row_index):
             "unit": normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), "")),
             "plan_quantity": "",
             "unit_price": "",
-            "evidence": get_evidence_of_material_inspection(
-                st.session_state.get(row_key(row_index, "custom_code"), ""),
-                st.session_state.get(row_key(row_index, "custom_description"), ""),
-            ),
+            # Manual fallback rows intentionally do not auto-fill evidence,
+            # plan quantity, unit price, or any other official item data.
+            "evidence": "",
             "is_custom": True,
         }
     return {
@@ -2629,7 +2628,7 @@ def build_idr_header_form():
             """
             - **Date** → prints in the top-left date box. The dates beside Inspected/Measured/Calculated only print when initials are entered.
             - **Contractor or Sub.** → prints on the Contractor/Subcontractor line.
-            - **Weather** → prints on the Weather line.
+            - **Weather** → select a standard option or choose Custom / Manual and type your own weather.
             - **Inspected by / Measured by / Calculated by** → prints in the signature/initial boxes on the right side of the form.
             - **This is** → checks either Estimated Progress Measurement or Final Field Measurement.
             - **Item no.** → all selected pay-item codes print automatically beside the selected measurement checkbox.
@@ -2644,7 +2643,19 @@ def build_idr_header_form():
     with row1[1]:
         contractor = st.text_input("Contractor or Sub.", key=header_key("contractor"))
     with row1[2]:
-        weather = st.selectbox("Weather", [""] + WEATHER_OPTIONS, key=header_key("weather"))
+        weather_choice = st.selectbox(
+            "Weather",
+            [""] + WEATHER_OPTIONS + ["Custom / Manual"],
+            key=header_key("weather"),
+        )
+        if weather_choice == "Custom / Manual":
+            weather = st.text_input(
+                "Custom weather",
+                key=header_key("custom_weather"),
+                placeholder="Enter weather conditions",
+            )
+        else:
+            weather = weather_choice
     with row1[3]:
         inspected_by = st.text_input("Inspected by", key=header_key("inspected_by"))
     with row1[4]:
@@ -2699,6 +2710,11 @@ def build_idr_header_form():
 
 def build_idr_rows_form(pay_items):
     st.subheader("IDR Pay Item Table")
+    st.caption(
+        "Select an official item for automatic item data, or choose Custom / Manual in either "
+        "the Item Code or Item field to enter a fallback item manually. Manual rows do not "
+        "auto-fill evidence, plan quantity, or units."
+    )
     code_options, description_options = get_pay_item_options(pay_items)
 
     st.markdown(
@@ -2773,16 +2789,35 @@ def build_idr_rows_form(pay_items):
             st.text_input(f"Row {row_index + 1} Quantity", key=row_key(row_index, "quantity"), label_visibility="collapsed")
         with row_cols[5]:
             if is_custom:
+                custom_code_value = clean_line(
+                    st.session_state.get(row_key(row_index, "custom_code"), "")
+                )
+                custom_description_value = clean_line(
+                    st.session_state.get(row_key(row_index, "custom_description"), "")
+                )
+                custom_identity_entered = bool(custom_code_value or custom_description_value)
+
+                # Unit entry is allowed only after the user has typed a manual
+                # item code or a manual item description.
+                if not custom_identity_entered:
+                    st.session_state[row_key(row_index, "custom_unit")] = ""
+
                 st.text_input(
                     f"Row {row_index + 1} Unit",
                     key=row_key(row_index, "custom_unit"),
-                    placeholder="Unit",
+                    placeholder="Unit" if custom_identity_entered else "Enter custom item/code first",
                     label_visibility="collapsed",
+                    disabled=not custom_identity_entered,
                     on_change=on_custom_row_change,
                     args=(row_index,),
                 )
             else:
-                st.text_input(f"Row {row_index + 1} Unit", key=row_key(row_index, "unit"), label_visibility="collapsed", disabled=True)
+                st.text_input(
+                    f"Row {row_index + 1} Unit",
+                    key=row_key(row_index, "unit"),
+                    label_visibility="collapsed",
+                    disabled=True,
+                )
 
         row = get_row_for_output(row_index)
         row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
@@ -3074,8 +3109,8 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:G19", "H19:L19",
-        "D20:G20", "H20:L20",
+        "D19:G19", "H19:K19",
+        "D20:G20", "H20:K20",
         "C21:N22", "C23:N24", "C25:N33",
         "A34:D34", "M34:N34",
     ]:
@@ -3093,12 +3128,12 @@ def rebuild_bottom_section_layout(ws):
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
         )
 
-    # The item-number writing lines end at column L, immediately before the
-    # Posted in Q Book area begins. The selected numbers sit directly on these
-    # lines instead of being underlined character-by-character.
-    writing_line = Border(bottom=Side(style="thin", color="000000"))
-    ws["H19"].border = writing_line
-    ws["H20"].border = writing_line
+    # Put the closing parenthesis at the far right edge of the writing line.
+    for addr in ["L19", "L20"]:
+        copy_cell_style(measurement_text_style_source, ws[addr])
+        ws[addr].alignment = Alignment(
+            horizontal="right", vertical="center", wrap_text=False, shrink_to_fit=False
+        )
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
@@ -3119,6 +3154,14 @@ def rebuild_bottom_section_layout(ws):
     for row in range(19, 34):
         for col in range(2, 15):
             ws.cell(row=row, column=col).border = Border()
+
+    # Restore the two original item-number writing lines after clearing the
+    # other borders. They run from immediately after "item no.:" through
+    # column L, stopping before the Posted in Q Book section.
+    writing_line = Border(bottom=Side(style="thin", color="000000"))
+    for row in (19, 20):
+        for col in range(8, 13):  # H through L
+            ws.cell(row=row, column=col).border = writing_line
 
     for row in range(21, 23):
         ws.row_dimensions[row].height = 15
@@ -3167,7 +3210,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C23", "C25", "D19", "H19", "D20", "H20", "A34", "M34",
+        "C21", "C23", "C25", "D19", "H19", "L19", "D20", "H20", "L20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
@@ -3176,8 +3219,10 @@ def clear_exact_idr_values(ws):
     safe_set(ws, "C20", "☐")
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
     safe_set(ws, "H19", "")
+    safe_set(ws, "L19", ")")
     safe_set(ws, "D20", "a final field measurement (item no.:")
     safe_set(ws, "H20", "")
+    safe_set(ws, "L20", ")")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
@@ -3258,9 +3303,17 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     # places the item numbers directly on a real Excel bottom border and extends
     # that border only through column L, immediately before Posted in Q Book.
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
-    safe_set(ws, "H19", f"{estimated_numbers} )" if estimated_numbers else ")")
+    safe_set(ws, "H19", estimated_numbers)
+    safe_set(ws, "L19", ")")
     safe_set(ws, "D20", "a final field measurement (item no.:")
-    safe_set(ws, "H20", f"{final_numbers} )" if final_numbers else ")")
+    safe_set(ws, "H20", final_numbers)
+    safe_set(ws, "L20", ")")
+
+    # Keep selected item numbers pinned to the left edge of the writing line.
+    for addr in ["H19", "H20"]:
+        ws[addr].alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
+        )
     if measurement_type == "Estimated progress measurement":
         safe_set(ws, "C19", "☒")
     elif measurement_type == "Final field measurement":
