@@ -2712,15 +2712,15 @@ def build_idr_rows_form(pay_items):
         unsafe_allow_html=True,
     )
 
-    header_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 2.0])
-    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Evidence of Material Inspection"]
+    header_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 1.25])
+    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Plan Quantity Check"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
     rows = []
     for row_index in range(PDF_ROW_COUNT):
         ensure_row_defaults(row_index)
-        row_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 2.0])
+        row_cols = st.columns([1.0, 0.55, 2.45, 1.55, 0.75, 0.7, 1.25])
 
         current_code = st.session_state.get(row_key(row_index, "item_code"), "")
         current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
@@ -2788,13 +2788,12 @@ def build_idr_rows_form(pay_items):
         row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
         rows.append(row)
         with row_cols[6]:
-            st.text_area(
-                f"Row {row_index + 1} Evidence of Material Inspection",
-                value=row.get("evidence", ""),
-                height=72,
-                disabled=True,
-                label_visibility="collapsed",
-                key=row_key(row_index, "evidence_display"),
+            st.markdown(
+                quantity_status_badge_html(
+                    row.get("quantity", ""),
+                    row.get("plan_quantity", ""),
+                ),
+                unsafe_allow_html=True,
             )
 
     return rows
