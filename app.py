@@ -22,7 +22,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from openpyxl.formatting.rule import FormulaRule
-from openpyxl.styles import PatternFill, Alignment, Font
+from openpyxl.styles import PatternFill, Alignment, Font, Border
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
@@ -3031,11 +3031,11 @@ def copy_cell_style(source_cell, target_cell):
 
 def rebuild_bottom_section_layout(ws):
     """
-    Rebuild the lower part of the IDR so it matches the paper form:
-    - rows 19-20: measurement checkboxes with item numbers directly after "item no.:"
-    - rows 21-23: permanent instruction in the Remarks area
-    - rows 24-27: optional COGO area-calculation statement
-    - rows 28-33: user's typed remarks
+    Rebuild the lower part of the IDR without separator lines:
+    - rows 19-20: measurement checkboxes and item numbers
+    - rows 21-22: permanent Remarks instruction
+    - rows 23-26: optional COGO statement, left-aligned with remarks
+    - rows 27-33: user's typed remarks
     - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -3068,14 +3068,14 @@ def rebuild_bottom_section_layout(ws):
 
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
-    safe_set(ws, "C24", "")
-    safe_set(ws, "C28", "")
+    safe_set(ws, "C23", "")
+    safe_set(ws, "C27", "")
     safe_set(ws, "A34", "")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
         "D19:N19", "D20:N20",
-        "C21:N23", "C24:N27", "C28:N33",
+        "C21:N22", "C23:N26", "C27:N33",
         "A34:D34", "M34:N34",
     ]:
         try:
@@ -3094,24 +3094,29 @@ def rebuild_bottom_section_layout(ws):
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    for anchor_addr in ["C21", "C24", "C28"]:
+    for anchor_addr in ["C21", "C23", "C27"]:
         anchor = ws[anchor_addr]
         copy_cell_style(remarks_box_style_source, anchor)
         anchor.alignment = Alignment(
             horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False
         )
+        # These are continuous text areas, not separate boxes.
+        anchor.border = Border()
 
-    # The permanent instruction remains at the top of the Remarks area.
     ws["C21"].font = make_font_with_size(ws["C21"].font, 10)
-    # COGO starts at the same left edge as typed remarks and sits immediately
-    # below the permanent instruction without overlapping it.
-    ws["C24"].font = make_font_with_size(ws["C24"].font, 10)
+    ws["C23"].font = make_font_with_size(ws["C23"].font, 10)
 
-    for row in range(21, 24):
+    # Remove the horizontal separator rules below the measurement choices and
+    # throughout the Remarks/COGO area.
+    for row in range(19, 34):
+        for col in range(2, 15):
+            ws.cell(row=row, column=col).border = Border()
+
+    for row in range(21, 23):
         ws.row_dimensions[row].height = 15
-    for row in range(24, 28):
+    for row in range(23, 27):
         ws.row_dimensions[row].height = 15
-    for row in range(28, 34):
+    for row in range(27, 34):
         ws.row_dimensions[row].height = 15
     ws.row_dimensions[34].height = 16
 
@@ -3154,7 +3159,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C24", "C28", "D19", "D20", "A34", "M34",
+        "C21", "C23", "C27", "D19", "D20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
@@ -3243,8 +3248,8 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
             "(attached Area Calculation, pointlist, and coordinates measured quantity "
             "compares to plan quantity.)"
         )
-    safe_set(ws, "C24", cogo_statement)
-    safe_set(ws, "C28", clean_line(idr_info.get("remarks", "")))
+    safe_set(ws, "C23", cogo_statement)
+    safe_set(ws, "C27", clean_line(idr_info.get("remarks", "")))
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
