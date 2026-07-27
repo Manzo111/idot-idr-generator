@@ -22,7 +22,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from openpyxl.formatting.rule import FormulaRule
-from openpyxl.styles import PatternFill, Alignment, Font, Border
+from openpyxl.styles import PatternFill, Alignment, Font, Border, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
@@ -3034,8 +3034,8 @@ def rebuild_bottom_section_layout(ws):
     Rebuild the lower part of the IDR without separator lines:
     - rows 19-20: measurement checkboxes and item numbers
     - rows 21-22: permanent Remarks instruction
-    - rows 23-26: optional COGO statement, left-aligned with remarks
-    - rows 27-33: user's typed remarks
+    - rows 23-24: optional COGO statement, left-aligned with remarks
+    - rows 25-33: user's typed remarks
     - row 34: printed date and revision footer
     """
     label_style_source = ws["B21"]
@@ -3069,13 +3069,14 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", STANDARD_REMARKS_INSTRUCTION)
     safe_set(ws, "C23", "")
-    safe_set(ws, "C27", "")
+    safe_set(ws, "C25", "")
     safe_set(ws, "A34", "")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for merge in [
-        "D19:N19", "D20:N20",
-        "C21:N22", "C23:N26", "C27:N33",
+        "D19:G19", "H19:L19",
+        "D20:G20", "H20:L20",
+        "C21:N22", "C23:N24", "C25:N33",
         "A34:D34", "M34:N34",
     ]:
         try:
@@ -3086,15 +3087,22 @@ def rebuild_bottom_section_layout(ws):
     copy_cell_style(label_style_source, ws["B19"])
     for addr in ["C19", "C20"]:
         copy_cell_style(checkbox_style_source, ws[addr])
-    for addr in ["D19", "D20"]:
+    for addr in ["D19", "D20", "H19", "H20"]:
         copy_cell_style(measurement_text_style_source, ws[addr])
         ws[addr].alignment = Alignment(
             horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True
         )
 
+    # The item-number writing lines end at column L, immediately before the
+    # Posted in Q Book area begins. The selected numbers sit directly on these
+    # lines instead of being underlined character-by-character.
+    writing_line = Border(bottom=Side(style="thin", color="000000"))
+    ws["H19"].border = writing_line
+    ws["H20"].border = writing_line
+
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    for anchor_addr in ["C21", "C23", "C27"]:
+    for anchor_addr in ["C21", "C23", "C25"]:
         anchor = ws[anchor_addr]
         copy_cell_style(remarks_box_style_source, anchor)
         anchor.alignment = Alignment(
@@ -3114,9 +3122,9 @@ def rebuild_bottom_section_layout(ws):
 
     for row in range(21, 23):
         ws.row_dimensions[row].height = 15
-    for row in range(23, 27):
+    for row in range(23, 25):
         ws.row_dimensions[row].height = 15
-    for row in range(27, 34):
+    for row in range(25, 34):
         ws.row_dimensions[row].height = 15
     ws.row_dimensions[34].height = 16
 
@@ -3159,15 +3167,17 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "C23", "C27", "D19", "D20", "A34", "M34",
+        "C21", "C23", "C25", "D19", "H19", "D20", "H20", "A34", "M34",
     ]:
         safe_set(ws, cell, "")
 
     # Restore checkboxes and measurement labels in the moved section.
     safe_set(ws, "C19", "☐")
     safe_set(ws, "C20", "☐")
-    safe_set(ws, "D19", "an estimated progress measurement (item no.: )")
-    safe_set(ws, "D20", "a final field measurement (item no.: )")
+    safe_set(ws, "D19", "an estimated progress measurement (item no.:")
+    safe_set(ws, "H19", "")
+    safe_set(ws, "D20", "a final field measurement (item no.:")
+    safe_set(ws, "H20", "")
     safe_set(ws, "M34", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
@@ -3244,16 +3254,13 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     estimated_numbers = automatic_item_numbers if measurement_type == "Estimated progress measurement" else ""
     final_numbers = automatic_item_numbers if measurement_type == "Final field measurement" else ""
 
-    # Match the original paper by placing the selected item numbers on an
-    # underlined writing line inside the parentheses. Combining underline
-    # characters preserve the current left alignment directly after "item no.:".
-    estimated_display = underline_text(estimated_numbers) if estimated_numbers else "____________________________"
-    final_display = underline_text(final_numbers) if final_numbers else "____________________________"
-
-    estimated_line = f"an estimated progress measurement (item no.: {estimated_display})"
-    final_line = f"a final field measurement (item no.: {final_display})"
-    safe_set(ws, "D19", estimated_line)
-    safe_set(ws, "D20", final_line)
+    # Keep the wording and the writing line in separate merged areas. This
+    # places the item numbers directly on a real Excel bottom border and extends
+    # that border only through column L, immediately before Posted in Q Book.
+    safe_set(ws, "D19", "an estimated progress measurement (item no.:")
+    safe_set(ws, "H19", f"{estimated_numbers} )" if estimated_numbers else ")")
+    safe_set(ws, "D20", "a final field measurement (item no.:")
+    safe_set(ws, "H20", f"{final_numbers} )" if final_numbers else ")")
     if measurement_type == "Estimated progress measurement":
         safe_set(ws, "C19", "☒")
     elif measurement_type == "Final field measurement":
@@ -3274,7 +3281,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
             "compares to plan quantity.)"
         )
     safe_set(ws, "C23", cogo_statement)
-    safe_set(ws, "C27", clean_line(idr_info.get("remarks", "")))
+    safe_set(ws, "C25", clean_line(idr_info.get("remarks", "")))
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
@@ -3304,7 +3311,7 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     ws.row_dimensions[20].height = max(ws.row_dimensions[20].height or 0, 18)
     for remarks_row in range(21, 25):
         ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 17)
-    for remarks_row in range(24, 28):
+    for remarks_row in range(23, 26):
         ws.row_dimensions[remarks_row].height = max(ws.row_dimensions[remarks_row].height or 0, 18)
 
     try:
