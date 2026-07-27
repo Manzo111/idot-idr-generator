@@ -2266,7 +2266,7 @@ def clear_idr_row_state():
     for row_index in range(PDF_ROW_COUNT):
         for field in [
             "item_code", "item_description", "custom_code", "custom_description",
-            "location", "quantity", "unit", "custom_unit", "plan_quantity",
+            "location", "quantity", "calculation", "unit", "custom_unit", "plan_quantity",
             "unit_price", "is_custom",
         ]:
             st.session_state.pop(row_key(row_index, field), None)
@@ -2280,6 +2280,7 @@ def ensure_row_defaults(row_index):
         "custom_description": "",
         "location": "",
         "quantity": "",
+        "calculation": "",
         "unit": "",
         "custom_unit": "",
         "plan_quantity": "",
@@ -2354,6 +2355,7 @@ def get_row_for_output(row_index):
             "item_description": clean_line(st.session_state.get(row_key(row_index, "custom_description"), "")),
             "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
             "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
+            "calculation": clean_line(st.session_state.get(row_key(row_index, "calculation"), "")),
             "unit": normalize_unit(st.session_state.get(row_key(row_index, "custom_unit"), "")),
             "plan_quantity": "",
             "unit_price": "",
@@ -2364,11 +2366,102 @@ def get_row_for_output(row_index):
         "item_description": clean_line(st.session_state.get(row_key(row_index, "item_description"), "")),
         "location": clean_line(st.session_state.get(row_key(row_index, "location"), "")),
         "quantity": clean_line(st.session_state.get(row_key(row_index, "quantity"), "")),
+        "calculation": clean_line(st.session_state.get(row_key(row_index, "calculation"), "")),
         "unit": normalize_unit(st.session_state.get(row_key(row_index, "unit"), "")),
         "plan_quantity": clean_line(st.session_state.get(row_key(row_index, "plan_quantity"), "")),
         "unit_price": clean_line(st.session_state.get(row_key(row_index, "unit_price"), "")),
         "is_custom": False,
     }
+
+
+STANDARD_REMARKS_INSTRUCTION = (
+    "(e.g. instruction to Contractor, special problems, sketches with dimensions "
+    "for final measurements, computations, number of persons working, hours worked) "
+    "Use reverse side, if needed."
+)
+
+
+def selected_item_codes(rows):
+    """Return the unique, nonblank item codes currently shown on the IDR."""
+    codes = []
+    for row in rows or []:
+        code = normalize_pay_item_code(row.get("item_code", ""))
+        if not code or code == "CUSTOM / MANUAL":
+            continue
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+
+def parse_dimension_calculation(text):
+    """
+    Convert entries such as "6.5 ft x 2 ft" into
+    "6.5ft x 2ft = 13 SQFT". Multiple expressions may be separated by commas,
+    semicolons, or new lines.
+    """
+    text = clean_line(text)
+    if not text:
+        return [], None
+
+    pattern = re.compile(
+        r"(?P<a>\d+(?:\.\d+)?)\s*(?:ft|foot|feet|')?\s*[x×*]\s*"
+        r"(?P<b>\d+(?:\.\d+)?)\s*(?:ft|foot|feet|')?",
+        re.IGNORECASE,
+    )
+
+    calculations = []
+    total = 0.0
+    for match in pattern.finditer(text):
+        a = float(match.group("a"))
+        b = float(match.group("b"))
+        area = a * b
+        total += area
+        calculations.append(
+            f"{a:g}ft x {b:g}ft = {area:g} SQFT"
+        )
+
+    return calculations, total if calculations else None
+
+
+def build_measurement_calculations(rows):
+    """Build the lower calculation block in the same style as the paper IDR."""
+    blocks = []
+
+    for row in rows or []:
+        code = normalize_pay_item_code(row.get("item_code", ""))
+        description = clean_line(row.get("item_description", ""))
+        quantity = clean_line(row.get("quantity", ""))
+        unit = normalize_unit(row.get("unit", ""))
+        calculation_text = clean_line(row.get("calculation", ""))
+
+        if code == "CUSTOM / MANUAL":
+            code = ""
+        if description == "Custom / Manual":
+            description = ""
+        if not code and not description:
+            continue
+
+        title = clean_line(f"{code} {description}")
+        lines = [title]
+
+        dimension_lines, dimension_total = parse_dimension_calculation(calculation_text)
+        if dimension_lines:
+            lines.extend(dimension_lines)
+            if len(dimension_lines) > 1:
+                lines.append(f"TOTAL = {dimension_total:g} SQFT")
+        elif calculation_text:
+            lines.append(calculation_text)
+        elif quantity or unit:
+            lines.append(clean_line(f"{quantity} {unit}"))
+
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
+def build_full_remarks(user_remarks):
+    """Keep user remarks separate from the permanently printed instruction."""
+    return clean_line(user_remarks)
 
 
 def quantity_status_badge_html(quantity, plan_quantity):
@@ -2393,7 +2486,7 @@ def build_idr_header_form():
             - **Weather** → prints on the Weather line.
             - **Inspected by / Measured by / Calculated by / Checked by** → prints in the signature/initial boxes on the right side of the form.
             - **This is** → checks either Estimated Progress Measurement or Final Field Measurement.
-            - **Estimated item no. / Final item no.** → prints inside the parentheses beside the selected measurement checkbox.
+            - **Item no.** → all selected pay-item codes print automatically beside the selected measurement checkbox.
             - **Remarks** → prints in the expanded Remarks box under the measurement section.
             """
         )
@@ -2416,18 +2509,15 @@ def build_idr_header_form():
         checked_by = st.text_input("Checked by", key=header_key("checked_by"))
 
     st.markdown("**Measurement and remarks fields**")
-    row2 = st.columns([1.0, 1.2, 1.2, 4.0])
+    row2 = st.columns([1.4, 4.6])
     with row2[0]:
         measurement_type = st.selectbox(
             "This is",
             ["", "Estimated progress measurement", "Final field measurement"],
             key=header_key("measurement_type"),
         )
+        st.caption("The selected pay-item codes are inserted automatically in the item-no. line.")
     with row2[1]:
-        estimated_item_no = st.text_input("Estimated item no.", key=header_key("estimated_item_no"))
-    with row2[2]:
-        final_item_no = st.text_input("Final item no.", key=header_key("final_item_no"))
-    with row2[3]:
         remarks = st.text_area("Remarks", height=70, key=header_key("remarks"))
 
     return {
@@ -2439,8 +2529,6 @@ def build_idr_header_form():
         "calculated_by": calculated_by,
         "checked_by": checked_by,
         "measurement_type": measurement_type,
-        "estimated_item_no": estimated_item_no,
-        "final_item_no": final_item_no,
         "remarks": remarks,
     }
 
@@ -2460,15 +2548,15 @@ def build_idr_rows_form(pay_items):
         unsafe_allow_html=True,
     )
 
-    header_cols = st.columns([1.1, 0.7, 3.1, 2.2, 1.05, 0.9, 0.95])
-    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Unit", "Status"]
+    header_cols = st.columns([1.05, 0.65, 2.6, 1.8, 0.9, 1.5, 0.75, 0.85])
+    headers = ["Item Code #", "Fund", "Item", "Location", "Quantity", "Calculation / Dimensions", "Unit", "Status"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"<div class='idr-table-header'>{header}</div>", unsafe_allow_html=True)
 
     rows = []
     for row_index in range(PDF_ROW_COUNT):
         ensure_row_defaults(row_index)
-        row_cols = st.columns([1.1, 0.7, 3.1, 2.2, 1.05, 0.9, 0.95])
+        row_cols = st.columns([1.05, 0.65, 2.6, 1.8, 0.9, 1.5, 0.75, 0.85])
 
         current_code = st.session_state.get(row_key(row_index, "item_code"), "")
         current_desc = st.session_state.get(row_key(row_index, "item_description"), "")
@@ -2520,6 +2608,13 @@ def build_idr_rows_form(pay_items):
         with row_cols[4]:
             st.text_input(f"Row {row_index + 1} Quantity", key=row_key(row_index, "quantity"), label_visibility="collapsed")
         with row_cols[5]:
+            st.text_input(
+                f"Row {row_index + 1} Calculation / Dimensions",
+                key=row_key(row_index, "calculation"),
+                placeholder="Example: 6.5 ft x 2 ft",
+                label_visibility="collapsed",
+            )
+        with row_cols[6]:
             if is_custom:
                 st.text_input(
                     f"Row {row_index + 1} Unit",
@@ -2535,7 +2630,7 @@ def build_idr_rows_form(pay_items):
         row = get_row_for_output(row_index)
         row["fund_code"] = clean_line(st.session_state.get(row_key(row_index, "fund_code"), ""))
         rows.append(row)
-        with row_cols[6]:
+        with row_cols[7]:
             st.markdown(quantity_status_badge_html(row.get("quantity", ""), row.get("plan_quantity", "")), unsafe_allow_html=True)
 
     return rows
@@ -2695,7 +2790,7 @@ def prepare_exact_print_layout(wb, ws):
         if sheet.title != ws.title:
             sheet.sheet_state = "hidden"
 
-    ws.print_area = "A2:N30"
+    ws.print_area = "A2:N40"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
@@ -2721,16 +2816,13 @@ def copy_cell_style(source_cell, target_cell):
 
 def rebuild_bottom_section_layout(ws):
     """
-    Move the measurement checkbox section directly under the pay item table,
-    expand the remarks area, and place the footer text where requested.
-
-    New bottom layout:
-    - Rows 19-20: "This is" measurement checkboxes
-    - Rows 21-29: larger remarks box
-    - A30: printed date
-    - M30: BC 628 revision text
+    Rebuild the lower part of the IDR so it matches the paper form:
+    - rows 19-20: measurement checkboxes and automatic item-code list
+    - rows 21-25: remarks box
+    - rows 26-27: permanent remarks instruction
+    - rows 28-39: automatic item-code/name/calculation block
+    - row 40: printed date and revision footer
     """
-    # Save styles before unmerging/clearing the old template area.
     label_style_source = ws["B21"]
     checkbox_style_source = ws["C21"]
     measurement_text_style_source = ws["D21"]
@@ -2740,26 +2832,21 @@ def rebuild_bottom_section_layout(ws):
     footer_left_style_source = ws["B30"]
     footer_right_style_source = ws["N30"]
 
-    # Remove old and possible regenerated merges in the bottom area.
-    for range_coord in [
-        "D21:G21", "D23:G23", "C25:N29",
-        "D19:G19", "D20:G20", "C21:N29",
-        "A30:D30", "M30:N30",
-    ]:
-        try:
-            unmerge_range_keep_style(ws, range_coord)
-        except Exception:
-            pass
+    # Remove every merge that can overlap the rebuilt lower section.
+    for merged_range in list(ws.merged_cells.ranges):
+        if merged_range.min_row <= 40 and merged_range.max_row >= 19:
+            try:
+                unmerge_range_keep_style(ws, str(merged_range))
+            except Exception:
+                try:
+                    ws.unmerge_cells(str(merged_range))
+                except Exception:
+                    pass
 
-    # Clear old bottom values. Keep row heights/columns from the original template.
-    for row in range(19, 30):
+    for row in range(19, 41):
         for col in range(1, 15):
             ws.cell(row=row, column=col).value = None
 
-    for col in range(1, 15):
-        ws.cell(row=30, column=col).value = None
-
-    # Rebuild the moved measurement section.
     safe_set(ws, "B19", "This is:")
     safe_set(ws, "C19", "☐")
     safe_set(ws, "D19", "an estimated progress measurement (item no.:")
@@ -2768,79 +2855,58 @@ def rebuild_bottom_section_layout(ws):
     safe_set(ws, "D20", "a final field measurement (item no.:")
     safe_set(ws, "H20", ")")
 
-    # Rebuild the larger remarks section.
     safe_set(ws, "B21", "Remarks:")
     safe_set(ws, "C21", "")
+    safe_set(ws, "C26", STANDARD_REMARKS_INSTRUCTION)
+    safe_set(ws, "C28", "")
+    safe_set(ws, "A40", "")
+    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
-    # Footer values are filled later, but the display cells are moved here.
-    safe_set(ws, "A30", "")
-    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
+    for merge in [
+        "D19:G19", "I19:N19", "D20:G20", "I20:N20",
+        "C21:N25", "C26:N27", "C28:N39", "A40:D40", "M40:N40",
+    ]:
+        try:
+            ws.merge_cells(merge)
+        except Exception:
+            pass
 
-    # Recreate merged regions for long text.
-    try:
-        ws.merge_cells("D19:G19")
-    except Exception:
-        pass
-    try:
-        ws.merge_cells("D20:G20")
-    except Exception:
-        pass
-    try:
-        ws.merge_cells("C21:N29")
-    except Exception:
-        pass
-    try:
-        ws.merge_cells("A30:D30")
-    except Exception:
-        pass
-    try:
-        ws.merge_cells("M30:N30")
-    except Exception:
-        pass
-
-    # Apply styles to the moved section.
-    for cell_addr in ["B19"]:
-        copy_cell_style(label_style_source, ws[cell_addr])
-
-    for cell_addr in ["C19", "C20"]:
-        copy_cell_style(checkbox_style_source, ws[cell_addr])
-
-    for cell_addr in ["D19", "D20"]:
-        copy_cell_style(measurement_text_style_source, ws[cell_addr])
-        ws[cell_addr].alignment = Alignment(
-            horizontal=ws[cell_addr].alignment.horizontal or "left",
-            vertical=ws[cell_addr].alignment.vertical or "center",
-            wrap_text=False,
-        )
-
-    for cell_addr in ["H19", "H20"]:
-        copy_cell_style(close_paren_style_source, ws[cell_addr])
+    copy_cell_style(label_style_source, ws["B19"])
+    for addr in ["C19", "C20"]:
+        copy_cell_style(checkbox_style_source, ws[addr])
+    for addr in ["D19", "D20"]:
+        copy_cell_style(measurement_text_style_source, ws[addr])
+        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    for addr in ["H19", "H20"]:
+        copy_cell_style(close_paren_style_source, ws[addr])
+    for addr in ["I19", "I20"]:
+        copy_cell_style(measurement_text_style_source, ws[addr])
+        ws[addr].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, shrink_to_fit=True)
 
     copy_cell_style(remarks_label_style_source, ws["B21"])
 
-    # Style the expanded remarks merged box.
-    remarks_anchor = ws["C21"]
-    copy_cell_style(remarks_box_style_source, remarks_anchor)
-    remarks_anchor.alignment = Alignment(
-        horizontal="left",
-        vertical="top",
-        wrap_text=True,
-        shrink_to_fit=False,
-    )
+    for anchor_addr in ["C21", "C26", "C28"]:
+        anchor = ws[anchor_addr]
+        copy_cell_style(remarks_box_style_source, anchor)
+        anchor.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True, shrink_to_fit=False)
 
-    for row in range(21, 30):
-        for col in range(3, 15):
-            try:
-                copy_cell_style(remarks_anchor, ws.cell(row=row, column=col))
-            except Exception:
-                pass
+    # Smaller text for the permanent instruction and the lower computation block.
+    ws["C26"].font = make_font_with_size(ws["C26"].font, 8)
+    ws["C28"].font = make_font_with_size(ws["C28"].font, 9)
 
-    # Footer styling. A30/M30 are merged anchors.
-    copy_cell_style(footer_left_style_source, ws["A30"])
-    ws["A30"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-    copy_cell_style(footer_right_style_source, ws["M30"])
-    ws["M30"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
+    # Give the new lower rows usable print height.
+    for row in range(21, 26):
+        ws.row_dimensions[row].height = 16
+    for row in range(26, 28):
+        ws.row_dimensions[row].height = 14
+    for row in range(28, 40):
+        ws.row_dimensions[row].height = 15
+    ws.row_dimensions[40].height = 14
 
+    copy_cell_style(footer_left_style_source, ws["A40"])
+    ws["A40"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+    copy_cell_style(footer_right_style_source, ws["M40"])
+    ws["M40"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=False)
 
 
 def clear_exact_idr_values(ws):
@@ -2848,7 +2914,7 @@ def clear_exact_idr_values(ws):
     for cell in [
         "C6", "D8", "C10", "G6", "H6", "G7", "H7", "G8", "H8", "G9", "H9",
         "L2", "L3", "L4", "L5", "L6", "L7", "L8",
-        "C21", "H19", "H20", "A30", "M30",
+        "C21", "C26", "C28", "I19", "I20", "H19", "H20", "A40", "M40",
     ]:
         safe_set(ws, cell, "")
 
@@ -2857,7 +2923,7 @@ def clear_exact_idr_values(ws):
     safe_set(ws, "C20", "☐")
     safe_set(ws, "H19", ")")
     safe_set(ws, "H20", ")")
-    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
+    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
     for row in range(13, 19):
         for col in ["B", "C", "D", "F", "H", "I", "J", "M"]:
@@ -2882,8 +2948,8 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
 
     report_date = format_report_date(idr_info.get("date"))
     safe_set(ws, "C6", report_date)
-    safe_set(ws, "A30", f"Printed {report_date}")
-    safe_set(ws, "M30", "BC 628 (Rev. 8/04)")
+    safe_set(ws, "A40", f"Printed {report_date}")
+    safe_set(ws, "M40", "BC 628 (Rev. 8/04)")
 
     # Header/manual fields.
     safe_set(ws, "D8", idr_info.get("contractor", ""))
@@ -2907,14 +2973,23 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     safe_set(ws, "L8", metadata.get("federal_project", ""))
 
     measurement_type = clean_line(idr_info.get("measurement_type", ""))
+    automatic_item_numbers = ", ".join(selected_item_codes(rows))
     if measurement_type == "Estimated progress measurement":
         safe_set(ws, "C19", "☒")
-        safe_set(ws, "H19", (clean_line(idr_info.get("estimated_item_no", "")) + ")") if clean_line(idr_info.get("estimated_item_no", "")) else ")")
+        safe_set(ws, "I19", automatic_item_numbers)
     elif measurement_type == "Final field measurement":
         safe_set(ws, "C20", "☒")
-        safe_set(ws, "H20", (clean_line(idr_info.get("final_item_no", "")) + ")") if clean_line(idr_info.get("final_item_no", "")) else ")")
+        safe_set(ws, "I20", automatic_item_numbers)
 
-    safe_set(ws, "C21", idr_info.get("remarks", ""))
+    safe_set(ws, "C21", build_full_remarks(idr_info.get("remarks", "")))
+    safe_set(ws, "C26", STANDARD_REMARKS_INSTRUCTION)
+
+    # The paper example includes this lower calculation block only when the IDR
+    # is identified as an estimated or final measurement.
+    if measurement_type in ["Estimated progress measurement", "Final field measurement"]:
+        safe_set(ws, "C28", build_measurement_calculations(rows))
+    else:
+        safe_set(ws, "C28", "")
 
     for i in range(PDF_ROW_COUNT):
         excel_row = 13 + i
