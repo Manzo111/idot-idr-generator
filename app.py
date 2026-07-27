@@ -3175,6 +3175,22 @@ def clear_exact_idr_values(ws):
             safe_set(ws, f"{col}{row}", "")
 
 
+def format_short_contract_number(value):
+    """Return only the five-character IDOT contract suffix, e.g. 62V36."""
+    value = normalize_contract_input(value)
+    if not value:
+        return ""
+    if "-" in value:
+        value = value.split("-")[-1]
+    return value[-5:]
+
+
+def underline_text(value):
+    """Underline characters without changing their horizontal position in the cell."""
+    value = clean_line(value)
+    return "".join(char + "\u0332" for char in value)
+
+
 def fill_exact_idr_workbook(metadata, idr_info, rows):
     if not TEMPLATE_PATH.exists():
         raise FileNotFoundError(
@@ -3219,14 +3235,23 @@ def fill_exact_idr_workbook(metadata, idr_info, rows):
     safe_set(ws, "L3", metadata.get("key_route", ""))
     safe_set(ws, "L4", metadata.get("marked_route", ""))
     safe_set(ws, "L5", metadata.get("district", ""))
-    safe_set(ws, "L6", metadata.get("item_contract", ""))
+    safe_set(ws, "L6", format_short_contract_number(metadata.get("item_contract", "")))
     safe_set(ws, "L7", metadata.get("state_job", ""))
     safe_set(ws, "L8", metadata.get("federal_project", ""))
 
     measurement_type = clean_line(idr_info.get("measurement_type", ""))
     automatic_item_numbers = ", ".join(selected_item_codes(rows))
-    estimated_line = f"an estimated progress measurement (item no.: {automatic_item_numbers if measurement_type == 'Estimated progress measurement' else ''})"
-    final_line = f"a final field measurement (item no.: {automatic_item_numbers if measurement_type == 'Final field measurement' else ''})"
+    estimated_numbers = automatic_item_numbers if measurement_type == "Estimated progress measurement" else ""
+    final_numbers = automatic_item_numbers if measurement_type == "Final field measurement" else ""
+
+    # Match the original paper by placing the selected item numbers on an
+    # underlined writing line inside the parentheses. Combining underline
+    # characters preserve the current left alignment directly after "item no.:".
+    estimated_display = underline_text(estimated_numbers) if estimated_numbers else "____________________________"
+    final_display = underline_text(final_numbers) if final_numbers else "____________________________"
+
+    estimated_line = f"an estimated progress measurement (item no.: {estimated_display})"
+    final_line = f"a final field measurement (item no.: {final_display})"
     safe_set(ws, "D19", estimated_line)
     safe_set(ws, "D20", final_line)
     if measurement_type == "Estimated progress measurement":
