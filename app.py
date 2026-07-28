@@ -597,6 +597,15 @@ def sqlite_record_miss(user_job_number):
     except Exception:
         pass
 
+def sqlite_clear_contract_misses():
+    """Clear remembered failed searches after rebuilding the contract index."""
+    try:
+        with get_contract_db_connection() as conn:
+            conn.execute('DELETE FROM contract_misses')
+            conn.commit()
+    except Exception:
+        pass
+
 def sqlite_get_meta(key):
     try:
         with get_contract_db_connection() as conn:
@@ -1864,7 +1873,43 @@ st.title('IDOT Job IDR Generator')
 st.write('Enter an IDOT job/contract number or paste the direct IDOT contract URL. The website fills the IDR form and exports a PDF that matches the Excel template layout.')
 with st.sidebar:
     st.header('Job Lookup')
-    job_number = st.text_input('IDOT Job / Contract Number or Contract Detail URL', placeholder='Example: 62K33, 001-62K33, or paste the IDOT contract URL')
+    job_number = st.text_input(
+        'IDOT Job / Contract Number or Contract Detail URL',
+        placeholder='Example: 62K33, 001-62K33, or paste the IDOT contract URL',
+    )
+
+    if st.button('Build / Refresh Contract Index', use_container_width=True):
+        try:
+            with st.spinner('Building the full IDOT contract index. This may take a few minutes...'):
+                session = make_session()
+
+                # Refresh the letting list instead of relying on an old Streamlit cache.
+                letting_links = get_all_archive_letting_links_newest_first(session)
+
+                if not letting_links:
+                    raise RuntimeError('IDOT did not return any letting/archive pages.')
+
+                result = build_sqlite_contract_index_for_lettings(
+                    letting_links=letting_links,
+                    max_pages_per_letting=FULL_INDEX_MAX_PAGES_PER_LETTING,
+                    meta_key='full_contract_index',
+                    meta_ttl_seconds=FULL_INDEX_TTL_SECONDS,
+                    force=True,
+                    source_suffix='manual-full-index',
+                )
+
+                # A job that previously failed may be stored in contract_misses.
+                # Clear those misses so the newly built index is checked immediately.
+                sqlite_clear_contract_misses()
+                st.cache_data.clear()
+
+            st.success(
+                f"Index complete: checked {result.get('checked_lettings', 0)} letting(s), "
+                f"{result.get('checked_pages', 0)} page(s), and saved "
+                f"{result.get('saved_contracts', 0)} contract entries."
+            )
+        except Exception as e:
+            st.error(f'Index build failed: {e}')
 if 'metadata' not in st.session_state:
     st.session_state.metadata = None
 if 'pay_items' not in st.session_state:
