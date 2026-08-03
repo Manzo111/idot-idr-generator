@@ -2,6 +2,8 @@ import io
 import re
 import sqlite3
 import time
+import zlib
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import copy
 from pathlib import Path
@@ -13,9 +15,19 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, Border, Side
+from pdfrw import PdfReader, PdfWriter, PdfName, PdfObject
 BASE_DIR = Path(__file__).parent
 TEMPLATE_CANDIDATES = [BASE_DIR / 'IDR_Template.xlsx', BASE_DIR / 'IDR_template.xlsx']
 TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
+PDF_TEMPLATE_CANDIDATES = [
+    BASE_DIR / 'bc-628.pdf',
+    BASE_DIR / 'BC-628.pdf',
+    BASE_DIR / 'BC_628.pdf',
+]
+PDF_TEMPLATE_PATH = next(
+    (path for path in PDF_TEMPLATE_CANDIDATES if path.exists()),
+    PDF_TEMPLATE_CANDIDATES[0],
+)
 BASE_URL = 'https://webapps1.dot.illinois.gov'
 IDOT_HOME_URL = 'https://webapps1.dot.illinois.gov/WCTB/LBHome'
 SEARCH_MAX_PAGES_PER_LETTING = 4
@@ -1844,9 +1856,217 @@ def convert_xlsx_bytes_to_pdf(xlsx_bytes):
             raise RuntimeError(f'LibreOffice could not convert the filled template to PDF.\n\nstdout: {result.stdout}\n\nstderr: {result.stderr}')
         return io.BytesIO(pdf_path.read_bytes())
 
+def _decode_xfa_stream(packet):
+    """Return decoded bytes from an XFA packet stream."""
+    raw = packet.stream
+    if raw is None:
+        return b''
+    if isinstance(raw, str):
+        raw = raw.encode('latin1', errors='ignore')
+
+    filter_value = str(getattr(packet, 'Filter', '') or '')
+    if 'FlateDecode' in filter_value:
+        return zlib.decompress(raw)
+    return raw
+
+
+def _replace_xfa_stream(packet, data):
+    """Replace an XFA packet with compressed XML bytes."""
+    compressed = zlib.compress(data)
+    packet.stream = compressed.decode('latin1')
+    packet.Filter = PdfName.FlateDecode
+    packet.Length = PdfObject(str(len(compressed)))
+
+
+def _get_xfa_packet(xfa_array, packet_name):
+    for index in range(0, len(xfa_array), 2):
+        name = str(xfa_array[index]).strip('()')
+        if name == packet_name:
+            return xfa_array[index + 1]
+    raise KeyError(f'XFA packet not found: {packet_name}')
+
+
+def _contract_suffix(value):
+    value = clean_line(value).upper()
+    return value.split('-')[-1][-5:] if value else ''
+
+
+def _set_xml_text(parent, tag_name, value):
+    element = parent.find(tag_name)
+    if element is None:
+        element = ET.SubElement(parent, tag_name)
+    element.text = clean_line(value)
+
+
+def _build_bc628_datasets_xml(metadata, idr_info, rows):
+    xfa_ns = 'http://www.xfa.org/schema/xfa-data/1.0/'
+    ET.register_namespace('xfa', xfa_ns)
+
+    datasets = ET.Element(f'{{{xfa_ns}}}datasets')
+    data = ET.SubElement(datasets, f'{{{xfa_ns}}}data')
+    form1 = ET.SubElement(data, 'form1')
+    page1 = ET.SubElement(form1, 'page1')
+    top = ET.SubElement(page1, 'subTop')
+
+    report_date = format_report_date(idr_info.get('date', ''))
+    inspected_by = clean_line(idr_info.get('inspected_by', ''))
+    measured_by = clean_line(idr_info.get('measured_by', ''))
+    calculated_by = clean_line(idr_info.get('calculated_by', ''))
+
+    top_values = {
+        'date': report_date,
+        'contractor': idr_info.get('contractor', ''),
+        'weather': idr_info.get('weather', ''),
+        'inspInt': inspected_by,
+        'meaInt': measured_by,
+        'calInt': calculated_by,
+        'cheInt': '',
+        'inspDate': report_date if inspected_by else '',
+        'meaDate': report_date if measured_by else '',
+        'calDate': report_date if calculated_by else '',
+        'cheDate': '',
+        'county': metadata.get('county', ''),
+        'sectionNo': metadata.get('key_route', ''),
+        'route': metadata.get('marked_route', ''),
+        'district': metadata.get('district', ''),
+        'contractNo': _contract_suffix(metadata.get('item_contract', '')),
+        'jobNo': metadata.get('state_job', ''),
+        'project': metadata.get('federal_project', ''),
+    }
+    for field_name, value in top_values.items():
+        _set_xml_text(top, field_name, value)
+
+    table = ET.SubElement(page1, 'table')
+    header = ET.SubElement(table, 'headerRow')
+    header.set(f'{{{xfa_ns}}}dataNode', 'dataGroup')
+
+    for row_index in range(6):
+        row_group = ET.SubElement(table, f'row{row_index + 1}')
+        row = rows[row_index] if row_index < len(rows) else {}
+
+        code = clean_line(row.get('item_code', ''))
+        if code.upper() == 'CUSTOM / MANUAL':
+            code = ''
+        description = clean_line(row.get('item_description', ''))
+        if description.upper() == 'CUSTOM / MANUAL':
+            description = ''
+
+        quantity = clean_line(row.get('quantity', ''))
+        unit = normalize_unit(row.get('unit', ''))
+        quantity_and_unit = clean_line(f'{quantity} {unit}') if quantity or unit else ''
+
+        row_values = {
+            'itemCode': code,
+            'fundCode': row.get('fund_code', ''),
+            'itemName': description,
+            'locationName': row.get('location', ''),
+            'quanUnit': quantity_and_unit,
+            'evidence': row.get('evidence', ''),
+            'postedQ': '',
+        }
+        for field_name, value in row_values.items():
+            _set_xml_text(row_group, field_name, value)
+
+    selected_codes = selected_item_codes(rows)
+    code_text = ', '.join(selected_codes)
+    measurement_type = clean_line(idr_info.get('measurement_type', ''))
+
+    bottom = ET.SubElement(page1, 'subBottom')
+    _set_xml_text(
+        bottom,
+        'estimateEdit',
+        code_text if measurement_type == 'Estimated progress measurement' else '',
+    )
+    _set_xml_text(
+        bottom,
+        'finalEdit',
+        code_text if measurement_type == 'Final field measurement' else '',
+    )
+
+    remarks_parts = []
+    if idr_info.get('include_cogo'):
+        cogo_year = clean_line(idr_info.get('cogo_year', ''))
+        remarks_parts.append(
+            'Used Cogo Area Calc Tool Trimble Access Version '
+            f'{cogo_year} Area Calculated from a list of points shot around the perimeter '
+            '(attached Area Calculation, pointlist, and coordinates measured quantity '
+            'compares to plan quantity.)'
+        )
+    typed_remarks = clean_line(idr_info.get('remarks', ''))
+    if typed_remarks:
+        remarks_parts.append(typed_remarks)
+
+    _set_xml_text(page1, 'remarks', '\n\n'.join(remarks_parts))
+    return ET.tostring(datasets, encoding='utf-8', xml_declaration=False)
+
+
+def _update_bc628_template_xml(template_xml, measurement_type):
+    """Update the official form captions so the selected measurement is checked."""
+    root = ET.fromstring(template_xml)
+    xfa_ns = 'http://www.xfa.org/schema/xfa-template/3.3/'
+    ns = {'xfa': xfa_ns}
+
+    estimated_selected = measurement_type == 'Estimated progress measurement'
+    final_selected = measurement_type == 'Final field measurement'
+
+    caption_values = {
+        'estimateEdit': (
+            ('☒' if estimated_selected else '☐')
+            + ' An estimated progress measurement (item no.:'
+        ),
+        'finalEdit': (
+            ('☒' if final_selected else '☐')
+            + ' A final field measurement (item no.:'
+        ),
+    }
+
+    for field_name, caption_text in caption_values.items():
+        field = root.find(f".//xfa:field[@name='{field_name}']", ns)
+        if field is None:
+            continue
+        text_node = field.find('./xfa:caption/xfa:value/xfa:text', ns)
+        if text_node is not None:
+            text_node.text = caption_text
+
+    return ET.tostring(root, encoding='utf-8', xml_declaration=False)
+
+
 def make_exact_idr_pdf(metadata, idr_info, rows):
-    xlsx_output = fill_exact_idr_workbook(metadata, idr_info, rows)
-    return convert_xlsx_bytes_to_pdf(xlsx_output)
+    """
+    Fill the official BC 628 XFA PDF directly.
+
+    The generated file must be opened in Adobe Acrobat Reader because the
+    official IDOT form is an XFA document. Browser PDF viewers display only
+    the built-in compatibility notice.
+    """
+    if not PDF_TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            'Official BC 628 PDF template not found. Put bc-628.pdf in the '
+            'same folder as this app file.'
+        )
+
+    reader = PdfReader(str(PDF_TEMPLATE_PATH))
+    acroform = getattr(reader.Root, 'AcroForm', None)
+    xfa_array = getattr(acroform, 'XFA', None) if acroform else None
+    if not xfa_array:
+        raise RuntimeError('The supplied BC 628 PDF does not contain an XFA form.')
+
+    datasets_packet = _get_xfa_packet(xfa_array, 'datasets')
+    template_packet = _get_xfa_packet(xfa_array, 'template')
+
+    datasets_xml = _build_bc628_datasets_xml(metadata, idr_info, rows)
+    template_xml = _update_bc628_template_xml(
+        _decode_xfa_stream(template_packet),
+        clean_line(idr_info.get('measurement_type', '')),
+    )
+
+    _replace_xfa_stream(datasets_packet, datasets_xml)
+    _replace_xfa_stream(template_packet, template_xml)
+
+    output = io.BytesIO()
+    PdfWriter().write(output, reader)
+    output.seek(0)
+    return output
 
 def make_pay_items_excel(metadata, pay_items):
     output = io.BytesIO()
@@ -1870,7 +2090,7 @@ def make_pay_items_excel(metadata, pay_items):
     return output
 st.set_page_config(page_title='IDOT Job IDR Generator', page_icon='📄', layout='wide')
 st.title('IDOT Job IDR Generator')
-st.write('Enter an IDOT job/contract number or paste the direct IDOT contract URL. The website fills the IDR form and exports a PDF that matches the Excel template layout.')
+st.write('Enter an IDOT job/contract number or paste the direct IDOT contract URL. The website fills the official BC 628 PDF form while preserving the existing job lookup, pay-item, evidence, custom-entry, COGO, and quantity-check features.')
 with st.sidebar:
     st.header('Job Lookup')
     job_number = st.text_input(
@@ -1971,7 +2191,7 @@ if metadata is not None and (not pay_items.empty):
     with col_c:
         try:
             pdf_file = make_exact_idr_pdf(metadata, idr_info, rows)
-            st.download_button(label='Download Exact IDR PDF', data=pdf_file, file_name=format_pdf_filename(metadata.get('item_contract', 'IDOT')), mime='application/pdf')
+            st.download_button(label='Download Official BC 628 PDF', data=pdf_file, file_name=format_pdf_filename(metadata.get('item_contract', 'IDOT')), mime='application/pdf')
         except Exception as e:
             st.error(f'Could not generate exact PDF: {e}')
             if not find_libreoffice_executable():

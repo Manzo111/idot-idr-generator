@@ -1,8 +1,8 @@
-streamlit>=1.32
-pandas>=2.0
-requests>=2.31
-beautifulsoup4>=4.12
-lxml>=5.0
-openpyxl>=3.1
-xlsxwriter>=3.2
-xlrd>=2.0.1
+streamlit
+pandas
+requests
+beautifulsoup4
+lxml
+openpyxl
+xlsxwriter
+pdfrw
