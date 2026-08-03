@@ -15,77 +15,20 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, Border, Side
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
-from reportlab.lib.colors import black, white
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.colors import black, white
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.colors import black, white
 BASE_DIR = Path(__file__).parent
 TEMPLATE_CANDIDATES = [BASE_DIR / 'IDR_Template.xlsx', BASE_DIR / 'IDR_template.xlsx']
 TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
-FLAT_FLAT_PDF_TEMPLATE_CANDIDATES = [
-    BASE_DIR / 'bc-628-flat-flat.pdf',
-    BASE_DIR / 'BC-628-flat-flat.pdf',
-    BASE_DIR / 'BC_628_flat_flat.pdf',
+FLAT_PDF_TEMPLATE_CANDIDATES = [
+    BASE_DIR / 'bc-628-flat.pdf',
+    BASE_DIR / 'BC-628-flat.pdf',
+    BASE_DIR / 'BC_628_flat.pdf',
 ]
-FLAT_FLAT_PDF_TEMPLATE_PATH = next(
-    (path for path in FLAT_FLAT_PDF_TEMPLATE_CANDIDATES if path.exists()),
-    FLAT_FLAT_PDF_TEMPLATE_CANDIDATES[0],
+FLAT_PDF_TEMPLATE_PATH = next(
+    (path for path in FLAT_PDF_TEMPLATE_CANDIDATES if path.exists()),
+    FLAT_PDF_TEMPLATE_CANDIDATES[0],
 )
-
-# Coordinates below are based on a standard 8.5 x 11 inch BC-628 form.
-# Values are PDF points measured from the lower-left corner.
-BC628_COORDS = {
-    # The flattened BC-628 supplied by IDOT is landscape: 792 x 612 points.
-    # PDF coordinates are measured from the lower-left corner.
-
-    # Upper-left fields
-    'date': (58, 531),
-    'contractor': (58, 514),
-    'weather': (58, 479),
-
-    # Initial/date block
-    'inspected_by': (353, 481),
-    'inspected_date': (434, 481),
-    'measured_by': (353, 464),
-    'measured_date': (434, 464),
-    'calculated_by': (353, 447),
-    'calculated_date': (434, 447),
-
-    # Upper-right job-information boxes
-    'county': (560, 527),
-    'route': (560, 505),
-    'section': (681, 505),
-    'district': (560, 454),
-    'contract': (649, 454),
-    'job': (719, 454),
-    'project': (560, 420),
-
-    # Pay-item table. This is the baseline of row 1.
-    'table_top_y': 287,
-    'table_row_height': 28.45,
-    'item_code_x': 22,
-    'fund_code_x': 107,
-    'description_x': 160,
-    'location_x': 290,
-    'quantity_x': 420,
-    'evidence_x': 512,
-
-    # Measurement rows
-    'estimated_check': (49, 118),
-    'estimated_item_x': 274,
-    'final_check': (49, 99),
-    'final_item_x': 244,
-
-    # Remarks box
-    'remarks_x': 45,
-    'remarks_y': 164,
-    'remarks_width': 718,
-    'remarks_height': 95,
-}
 BASE_URL = 'https://webapps1.dot.illinois.gov'
 IDOT_HOME_URL = 'https://webapps1.dot.illinois.gov/WCTB/LBHome'
 SEARCH_MAX_PAGES_PER_LETTING = 4
