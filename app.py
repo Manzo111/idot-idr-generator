@@ -32,48 +32,52 @@ FLAT_PDF_TEMPLATE_PATH = next(
 # Coordinates below are based on a standard 8.5 x 11 inch BC-628 form.
 # Values are PDF points measured from the lower-left corner.
 BC628_COORDS = {
-    'date': (57, 677),
-    'contractor': (57, 656),
-    'weather': (57, 635),
+    # The flattened BC-628 supplied by IDOT is landscape: 792 x 612 points.
+    # PDF coordinates are measured from the lower-left corner.
 
-    'inspected_by': (335, 677),
-    'inspected_date': (425, 677),
-    'measured_by': (335, 656),
-    'measured_date': (425, 656),
-    'calculated_by': (335, 635),
-    'calculated_date': (425, 635),
+    # Upper-left fields
+    'date': (58, 531),
+    'contractor': (58, 514),
+    'weather': (58, 479),
 
-    'county': (505, 720),
-    'section': (505, 700),
-    'route': (505, 680),
-    'district': (505, 660),
-    'contract': (505, 640),
-    'job': (505, 620),
-    'project': (505, 600),
+    # Initial/date block
+    'inspected_by': (353, 481),
+    'inspected_date': (434, 481),
+    'measured_by': (353, 464),
+    'measured_date': (434, 464),
+    'calculated_by': (353, 447),
+    'calculated_date': (434, 447),
 
-    'table_top_y': 554,
-    'table_row_height': 42,
-    'item_code_x': 48,
-    'fund_code_x': 114,
-    'description_x': 150,
-    'location_x': 305,
-    'quantity_x': 410,
-    'evidence_x': 470,
+    # Upper-right job-information boxes
+    'county': (560, 527),
+    'route': (560, 505),
+    'section': (681, 505),
+    'district': (560, 454),
+    'contract': (649, 454),
+    'job': (719, 454),
+    'project': (560, 420),
 
-    'estimated_check': (50, 282),
-    'estimated_text_x': 69,
-    'estimated_item_x': 315,
-    'final_check': (50, 261),
-    'final_text_x': 69,
-    'final_item_x': 286,
+    # Pay-item table. This is the baseline of row 1.
+    'table_top_y': 287,
+    'table_row_height': 28.45,
+    'item_code_x': 22,
+    'fund_code_x': 107,
+    'description_x': 160,
+    'location_x': 290,
+    'quantity_x': 420,
+    'evidence_x': 512,
 
-    'remarks_x': 47,
-    'remarks_y': 223,
-    'remarks_width': 520,
-    'remarks_height': 117,
+    # Measurement rows
+    'estimated_check': (49, 118),
+    'estimated_item_x': 274,
+    'final_check': (49, 99),
+    'final_item_x': 244,
 
-    'printed_x': 48,
-    'printed_y': 31,
+    # Remarks box
+    'remarks_x': 45,
+    'remarks_y': 164,
+    'remarks_width': 718,
+    'remarks_height': 95,
 }
 BASE_URL = 'https://webapps1.dot.illinois.gov'
 IDOT_HOME_URL = 'https://webapps1.dot.illinois.gov/WCTB/LBHome'
@@ -1981,11 +1985,10 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
     """
     Create a transparent overlay for the flattened BC-628 template.
 
-    BC628_COORDS uses a 612 x 792 point reference page. Coordinates are scaled
-    automatically if the flattened template uses a slightly different page size.
+    BC628_COORDS uses the official landscape 792 x 612 point BC-628 page. Coordinates are scaled only if the flattened copy has a slightly different size.
     """
-    reference_width = 612.0
-    reference_height = 792.0
+    reference_width = 792.0
+    reference_height = 612.0
     scale_x = float(page_width) / reference_width
     scale_y = float(page_height) / reference_height
 
@@ -2005,8 +2008,8 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
 
     # Top-left and signature fields.
     _pdf_text(c, report_date, sx(BC628_COORDS['date'][0]), sy(BC628_COORDS['date'][1]), 8)
-    _pdf_text(c, idr_info.get('contractor', ''), sx(BC628_COORDS['contractor'][0]), sy(BC628_COORDS['contractor'][1]), 8, max_width=sx(225))
-    _pdf_text(c, idr_info.get('weather', ''), sx(BC628_COORDS['weather'][0]), sy(BC628_COORDS['weather'][1]), 8, max_width=sx(225))
+    _pdf_text(c, idr_info.get('contractor', ''), sx(BC628_COORDS['contractor'][0]), sy(BC628_COORDS['contractor'][1]), 7.5, max_width=sx(165))
+    _pdf_text(c, idr_info.get('weather', ''), sx(BC628_COORDS['weather'][0]), sy(BC628_COORDS['weather'][1]), 7.5, max_width=sx(165))
 
     _pdf_text(c, inspected_by, sx(BC628_COORDS['inspected_by'][0]), sy(BC628_COORDS['inspected_by'][1]), 8)
     _pdf_text(c, report_date if inspected_by else '', sx(BC628_COORDS['inspected_date'][0]), sy(BC628_COORDS['inspected_date'][1]), 8)
@@ -2032,7 +2035,7 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
     ]
     for field_name, value in job_fields:
         x, y = BC628_COORDS[field_name]
-        _pdf_text(c, value, sx(x), sy(y), 7.5, max_width=sx(95))
+        _pdf_text(c, value, sx(x), sy(y), 7.2, max_width=sx(105))
 
     # Six pay-item rows.
     table_top_y = BC628_COORDS['table_top_y']
@@ -2062,8 +2065,8 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
             description,
             sx(BC628_COORDS['description_x']),
             sy(center_y + 8),
-            sx(150),
-            sy(29),
+            sx(116),
+            sy(22),
             size=7.0,
             leading=7.7,
         )
@@ -2072,19 +2075,19 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
             row.get('location', ''),
             sx(BC628_COORDS['location_x']),
             sy(center_y + 8),
-            sx(100),
-            sy(29),
+            sx(112),
+            sy(22),
             size=7.0,
             leading=7.7,
         )
-        _pdf_text(c, quantity_and_unit, sx(BC628_COORDS['quantity_x']), sy(center_y), 7.0, max_width=sx(57))
+        _pdf_text(c, quantity_and_unit, sx(BC628_COORDS['quantity_x']), sy(center_y), 7.0, max_width=sx(76))
         _wrap_pdf_text(
             c,
             row.get('evidence', ''),
             sx(BC628_COORDS['evidence_x']),
             sy(center_y + 8),
-            sx(96),
-            sy(29),
+            sx(204),
+            sy(22),
             size=6.5,
             leading=7.0,
         )
@@ -2153,13 +2156,6 @@ def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
         leading=8.4,
     )
 
-    _pdf_text(
-        c,
-        f'Printed {report_date}',
-        sx(BC628_COORDS['printed_x']),
-        sy(BC628_COORDS['printed_y']),
-        6.5,
-    )
 
     c.save()
     overlay.seek(0)
