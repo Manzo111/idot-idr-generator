@@ -1937,8 +1937,8 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
 
     # Upper-left fields.
     _draw_pdf_text(c, report_date, 31, 508, 80, 8)
-    _draw_pdf_text(c, clean_line(idr_info.get('contractor', '')), 31, 453, 250, 8)
-    _draw_pdf_text(c, idr_info.get('weather', ''), 31, 420, 250, 8)
+    _draw_pdf_text(c, clean_line(idr_info.get('contractor', '')), 31, 475, 250, 8)
+    _draw_pdf_text(c, idr_info.get('weather', ''), 31, 442, 250, 8)
 
     # Initials and dates.
     _draw_pdf_text(c, inspected_by, 327, 499, 65, 8)
@@ -2009,15 +2009,19 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
             leading=7,
         )
         _draw_pdf_text(c, quantity_and_unit, 413, baseline, 79, 7)
+        evidence_text = clean_line(row.get('evidence', ''))
+        if evidence_text.lower() in {'none', 'n/a', 'na'}:
+            evidence_text = ''
+
         _draw_wrapped_pdf_text(
             c,
-            row.get('evidence', ''),
+            evidence_text,
             499,
-            baseline + 4,
+            baseline + 5,
             208,
             17,
-            size=6.5,
-            leading=7,
+            size=8.0,
+            leading=8.5,
         )
 
     # Estimated/final measurement selection.
