@@ -5,4 +5,5 @@ beautifulsoup4
 lxml
 openpyxl
 xlsxwriter
-pdfrw
+pypdf
+reportlab
