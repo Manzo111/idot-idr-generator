@@ -13,9 +13,68 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, Border, Side
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.colors import black, white
 BASE_DIR = Path(__file__).parent
 TEMPLATE_CANDIDATES = [BASE_DIR / 'IDR_Template.xlsx', BASE_DIR / 'IDR_template.xlsx']
 TEMPLATE_PATH = next((path for path in TEMPLATE_CANDIDATES if path.exists()), TEMPLATE_CANDIDATES[0])
+FLAT_PDF_TEMPLATE_CANDIDATES = [
+    BASE_DIR / 'bc-628-flat.pdf',
+    BASE_DIR / 'BC-628-flat.pdf',
+    BASE_DIR / 'BC_628_flat.pdf',
+]
+FLAT_PDF_TEMPLATE_PATH = next(
+    (path for path in FLAT_PDF_TEMPLATE_CANDIDATES if path.exists()),
+    FLAT_PDF_TEMPLATE_CANDIDATES[0],
+)
+
+# Coordinates below are based on a standard 8.5 x 11 inch BC-628 form.
+# Values are PDF points measured from the lower-left corner.
+BC628_COORDS = {
+    'date': (57, 677),
+    'contractor': (57, 656),
+    'weather': (57, 635),
+
+    'inspected_by': (335, 677),
+    'inspected_date': (425, 677),
+    'measured_by': (335, 656),
+    'measured_date': (425, 656),
+    'calculated_by': (335, 635),
+    'calculated_date': (425, 635),
+
+    'county': (505, 720),
+    'section': (505, 700),
+    'route': (505, 680),
+    'district': (505, 660),
+    'contract': (505, 640),
+    'job': (505, 620),
+    'project': (505, 600),
+
+    'table_top_y': 554,
+    'table_row_height': 42,
+    'item_code_x': 48,
+    'fund_code_x': 114,
+    'description_x': 150,
+    'location_x': 305,
+    'quantity_x': 410,
+    'evidence_x': 470,
+
+    'estimated_check': (50, 282),
+    'estimated_text_x': 69,
+    'estimated_item_x': 315,
+    'final_check': (50, 261),
+    'final_text_x': 69,
+    'final_item_x': 286,
+
+    'remarks_x': 47,
+    'remarks_y': 223,
+    'remarks_width': 520,
+    'remarks_height': 117,
+
+    'printed_x': 48,
+    'printed_y': 31,
+}
 BASE_URL = 'https://webapps1.dot.illinois.gov'
 IDOT_HOME_URL = 'https://webapps1.dot.illinois.gov/WCTB/LBHome'
 SEARCH_MAX_PAGES_PER_LETTING = 4
@@ -1844,9 +1903,312 @@ def convert_xlsx_bytes_to_pdf(xlsx_bytes):
             raise RuntimeError(f'LibreOffice could not convert the filled template to PDF.\n\nstdout: {result.stdout}\n\nstderr: {result.stderr}')
         return io.BytesIO(pdf_path.read_bytes())
 
+def _pdf_text(canvas_obj, text, x, y, size=8, bold=False, max_width=None):
+    """Draw one line of text, shrinking only when needed to fit a field."""
+    text = clean_line(text)
+    if not text:
+        return
+
+    font_name = 'Helvetica-Bold' if bold else 'Helvetica'
+    draw_size = float(size)
+
+    if max_width:
+        while draw_size > 5 and canvas_obj.stringWidth(text, font_name, draw_size) > max_width:
+            draw_size -= 0.25
+
+    canvas_obj.setFont(font_name, draw_size)
+    canvas_obj.setFillColor(black)
+    canvas_obj.drawString(x, y, text)
+
+
+def _wrap_pdf_text(canvas_obj, text, x, y, width, max_height, size=8, leading=None, bold=False):
+    """Wrap text inside a fixed rectangle without overflowing the form."""
+    text = str(text or '').strip()
+    if not text:
+        return
+
+    font_name = 'Helvetica-Bold' if bold else 'Helvetica'
+    leading = leading or (size + 1.5)
+    max_lines = max(1, int(max_height // leading))
+
+    paragraphs = text.splitlines() or ['']
+    lines = []
+
+    for paragraph in paragraphs:
+        words = paragraph.split()
+        if not words:
+            lines.append('')
+            continue
+
+        current = words[0]
+        for word in words[1:]:
+            candidate = current + ' ' + word
+            if canvas_obj.stringWidth(candidate, font_name, size) <= width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        if lines:
+            last = lines[-1]
+            while last and canvas_obj.stringWidth(last + '...', font_name, size) > width:
+                last = last[:-1]
+            lines[-1] = last.rstrip() + '...'
+
+    canvas_obj.setFont(font_name, size)
+    canvas_obj.setFillColor(black)
+
+    current_y = y
+    for line in lines:
+        canvas_obj.drawString(x, current_y, line)
+        current_y -= leading
+
+
+def _draw_checkbox_mark(canvas_obj, x, y, selected):
+    """Draw a clear X inside the existing printed checkbox."""
+    if not selected:
+        return
+    canvas_obj.setStrokeColor(black)
+    canvas_obj.setLineWidth(1.2)
+    canvas_obj.line(x, y, x + 8, y + 8)
+    canvas_obj.line(x, y + 8, x + 8, y)
+
+
+def _build_bc628_overlay(metadata, idr_info, rows, page_width, page_height):
+    """
+    Create a transparent overlay for the flattened BC-628 template.
+
+    BC628_COORDS uses a 612 x 792 point reference page. Coordinates are scaled
+    automatically if the flattened template uses a slightly different page size.
+    """
+    reference_width = 612.0
+    reference_height = 792.0
+    scale_x = float(page_width) / reference_width
+    scale_y = float(page_height) / reference_height
+
+    def sx(value):
+        return float(value) * scale_x
+
+    def sy(value):
+        return float(value) * scale_y
+
+    overlay = io.BytesIO()
+    c = canvas.Canvas(overlay, pagesize=(float(page_width), float(page_height)))
+
+    report_date = format_report_date(idr_info.get('date', ''))
+    inspected_by = clean_line(idr_info.get('inspected_by', ''))
+    measured_by = clean_line(idr_info.get('measured_by', ''))
+    calculated_by = clean_line(idr_info.get('calculated_by', ''))
+
+    # Top-left and signature fields.
+    _pdf_text(c, report_date, sx(BC628_COORDS['date'][0]), sy(BC628_COORDS['date'][1]), 8)
+    _pdf_text(c, idr_info.get('contractor', ''), sx(BC628_COORDS['contractor'][0]), sy(BC628_COORDS['contractor'][1]), 8, max_width=sx(225))
+    _pdf_text(c, idr_info.get('weather', ''), sx(BC628_COORDS['weather'][0]), sy(BC628_COORDS['weather'][1]), 8, max_width=sx(225))
+
+    _pdf_text(c, inspected_by, sx(BC628_COORDS['inspected_by'][0]), sy(BC628_COORDS['inspected_by'][1]), 8)
+    _pdf_text(c, report_date if inspected_by else '', sx(BC628_COORDS['inspected_date'][0]), sy(BC628_COORDS['inspected_date'][1]), 8)
+
+    _pdf_text(c, measured_by, sx(BC628_COORDS['measured_by'][0]), sy(BC628_COORDS['measured_by'][1]), 8)
+    _pdf_text(c, report_date if measured_by else '', sx(BC628_COORDS['measured_date'][0]), sy(BC628_COORDS['measured_date'][1]), 8)
+
+    _pdf_text(c, calculated_by, sx(BC628_COORDS['calculated_by'][0]), sy(BC628_COORDS['calculated_by'][1]), 8)
+    _pdf_text(c, report_date if calculated_by else '', sx(BC628_COORDS['calculated_date'][0]), sy(BC628_COORDS['calculated_date'][1]), 8)
+
+    # Job information.
+    contract_value = clean_line(metadata.get('item_contract', ''))
+    contract_suffix = contract_value.split('-')[-1][-5:] if contract_value else ''
+
+    job_fields = [
+        ('county', metadata.get('county', '')),
+        ('section', metadata.get('key_route', '')),
+        ('route', metadata.get('marked_route', '')),
+        ('district', metadata.get('district', '')),
+        ('contract', contract_suffix),
+        ('job', metadata.get('state_job', '')),
+        ('project', metadata.get('federal_project', '')),
+    ]
+    for field_name, value in job_fields:
+        x, y = BC628_COORDS[field_name]
+        _pdf_text(c, value, sx(x), sy(y), 7.5, max_width=sx(95))
+
+    # Six pay-item rows.
+    table_top_y = BC628_COORDS['table_top_y']
+    row_height = BC628_COORDS['table_row_height']
+
+    for index in range(PDF_ROW_COUNT):
+        row = rows[index] if index < len(rows) else {}
+        center_y = table_top_y - index * row_height
+
+        code = clean_line(row.get('item_code', ''))
+        if code.upper() == 'CUSTOM / MANUAL':
+            code = ''
+
+        description = clean_line(row.get('item_description', ''))
+        if description.upper() == 'CUSTOM / MANUAL':
+            description = ''
+
+        quantity = clean_line(row.get('quantity', ''))
+        unit = normalize_unit(row.get('unit', ''))
+        quantity_and_unit = clean_line(f'{quantity} {unit}') if quantity or unit else ''
+
+        _pdf_text(c, code, sx(BC628_COORDS['item_code_x']), sy(center_y), 7.2, max_width=sx(63))
+        _pdf_text(c, row.get('fund_code', ''), sx(BC628_COORDS['fund_code_x']), sy(center_y), 7.2, max_width=sx(31))
+
+        _wrap_pdf_text(
+            c,
+            description,
+            sx(BC628_COORDS['description_x']),
+            sy(center_y + 8),
+            sx(150),
+            sy(29),
+            size=7.0,
+            leading=7.7,
+        )
+        _wrap_pdf_text(
+            c,
+            row.get('location', ''),
+            sx(BC628_COORDS['location_x']),
+            sy(center_y + 8),
+            sx(100),
+            sy(29),
+            size=7.0,
+            leading=7.7,
+        )
+        _pdf_text(c, quantity_and_unit, sx(BC628_COORDS['quantity_x']), sy(center_y), 7.0, max_width=sx(57))
+        _wrap_pdf_text(
+            c,
+            row.get('evidence', ''),
+            sx(BC628_COORDS['evidence_x']),
+            sy(center_y + 8),
+            sx(96),
+            sy(29),
+            size=6.5,
+            leading=7.0,
+        )
+
+    # Estimated/final measurement section.
+    measurement_type = clean_line(idr_info.get('measurement_type', ''))
+    estimated_selected = measurement_type == 'Estimated progress measurement'
+    final_selected = measurement_type == 'Final field measurement'
+    selected_codes = ', '.join(selected_item_codes(rows))
+
+    _draw_checkbox_mark(
+        c,
+        sx(BC628_COORDS['estimated_check'][0]),
+        sy(BC628_COORDS['estimated_check'][1]),
+        estimated_selected,
+    )
+    _draw_checkbox_mark(
+        c,
+        sx(BC628_COORDS['final_check'][0]),
+        sy(BC628_COORDS['final_check'][1]),
+        final_selected,
+    )
+
+    _pdf_text(
+        c,
+        selected_codes if estimated_selected else '',
+        sx(BC628_COORDS['estimated_item_x']),
+        sy(BC628_COORDS['estimated_check'][1]),
+        7.0,
+        max_width=sx(245),
+    )
+    _pdf_text(
+        c,
+        selected_codes if final_selected else '',
+        sx(BC628_COORDS['final_item_x']),
+        sy(BC628_COORDS['final_check'][1]),
+        7.0,
+        max_width=sx(274),
+    )
+
+    # Remarks and optional COGO statement.
+    remarks_parts = []
+    if clean_line(idr_info.get('cogo_statement_option', '')) == 'Yes':
+        cogo_year = clean_line(idr_info.get('cogo_version_year', ''))
+        version_text = f' {cogo_year}' if cogo_year else ''
+        remarks_parts.append(
+            'Used Cogo Area Calc Tool Trimble Access Version'
+            f'{version_text} Area Calculated from a list of points shot around the perimeter '
+            '(attached Area Calculation, pointlist, and coordinates measured quantity '
+            'compares to plan quantity.)'
+        )
+
+    typed_remarks = clean_line(idr_info.get('remarks', ''))
+    if typed_remarks:
+        remarks_parts.append(typed_remarks)
+
+    remarks_text = '\n\n'.join(remarks_parts)
+    _wrap_pdf_text(
+        c,
+        remarks_text,
+        sx(BC628_COORDS['remarks_x']),
+        sy(BC628_COORDS['remarks_y']),
+        sx(BC628_COORDS['remarks_width']),
+        sy(BC628_COORDS['remarks_height']),
+        size=7.2,
+        leading=8.4,
+    )
+
+    _pdf_text(
+        c,
+        f'Printed {report_date}',
+        sx(BC628_COORDS['printed_x']),
+        sy(BC628_COORDS['printed_y']),
+        6.5,
+    )
+
+    c.save()
+    overlay.seek(0)
+    return overlay
+
+
 def make_exact_idr_pdf(metadata, idr_info, rows):
-    xlsx_output = fill_exact_idr_workbook(metadata, idr_info, rows)
-    return convert_xlsx_bytes_to_pdf(xlsx_output)
+    """
+    Fill a normal, browser-compatible flattened BC-628 PDF.
+
+    Required file:
+        bc-628-flat.pdf
+
+    Create that file once by opening the official bc-628.pdf in Adobe Reader,
+    printing it to Microsoft Print to PDF at Actual Size, and saving the result
+    beside app.py.
+    """
+    if not FLAT_PDF_TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            'Missing bc-628-flat.pdf. Open the official bc-628.pdf in Adobe Reader, '
+            'print it using Microsoft Print to PDF at Actual Size, save it as '
+            'bc-628-flat.pdf, and place it in the same folder as app.py.'
+        )
+
+    template_reader = PdfReader(str(FLAT_PDF_TEMPLATE_PATH))
+    if not template_reader.pages:
+        raise RuntimeError('bc-628-flat.pdf does not contain a page.')
+
+    template_page = template_reader.pages[0]
+    page_width = float(template_page.mediabox.width)
+    page_height = float(template_page.mediabox.height)
+
+    overlay_bytes = _build_bc628_overlay(
+        metadata=metadata,
+        idr_info=idr_info,
+        rows=rows,
+        page_width=page_width,
+        page_height=page_height,
+    )
+    overlay_reader = PdfReader(overlay_bytes)
+    template_page.merge_page(overlay_reader.pages[0])
+
+    writer = PdfWriter()
+    writer.add_page(template_page)
+
+    output = io.BytesIO()
+    writer.write(output)
+    output.seek(0)
+    return output
 
 def make_pay_items_excel(metadata, pay_items):
     output = io.BytesIO()
@@ -1870,7 +2232,7 @@ def make_pay_items_excel(metadata, pay_items):
     return output
 st.set_page_config(page_title='IDOT Job IDR Generator', page_icon='📄', layout='wide')
 st.title('IDOT Job IDR Generator')
-st.write('Enter an IDOT job/contract number or paste the direct IDOT contract URL. The website fills the IDR form and exports a PDF that matches the Excel template layout.')
+st.write('Enter an IDOT job/contract number or paste the direct IDOT contract URL. The website fills the browser-compatible flattened BC-628 PDF while preserving the existing job lookup, pay-item, evidence, quantity-check, custom-entry, COGO, and Excel-backup functions.')
 with st.sidebar:
     st.header('Job Lookup')
     job_number = st.text_input(
@@ -1971,8 +2333,6 @@ if metadata is not None and (not pay_items.empty):
     with col_c:
         try:
             pdf_file = make_exact_idr_pdf(metadata, idr_info, rows)
-            st.download_button(label='Download Exact IDR PDF', data=pdf_file, file_name=format_pdf_filename(metadata.get('item_contract', 'IDOT')), mime='application/pdf')
+            st.download_button(label='Download Filled BC-628 PDF', data=pdf_file, file_name=format_pdf_filename(metadata.get('item_contract', 'IDOT')), mime='application/pdf')
         except Exception as e:
-            st.error(f'Could not generate exact PDF: {e}')
-            if not find_libreoffice_executable():
-                st.info('On Streamlit Cloud, add a packages.txt file containing: libreoffice')
+            st.error(f'Could not generate BC-628 PDF: {e}')
