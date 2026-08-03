@@ -6,4 +6,3 @@ lxml
 openpyxl
 xlsxwriter
 pypdf
-reportlab
