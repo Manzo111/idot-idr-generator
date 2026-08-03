@@ -1937,8 +1937,8 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
 
     # Upper-left fields.
     _draw_pdf_text(c, report_date, 31, 508, 80, 8)
-    _draw_pdf_text(c, idr_info.get('contractor', ''), 31, 475, 250, 8)
-    _draw_pdf_text(c, idr_info.get('weather', ''), 31, 442, 250, 8)
+    _draw_pdf_text(c, clean_line(idr_info.get('contractor', '')), 31, 453, 250, 8)
+    _draw_pdf_text(c, idr_info.get('weather', ''), 31, 420, 250, 8)
 
     # Initials and dates.
     _draw_pdf_text(c, inspected_by, 327, 499, 65, 8)
@@ -1958,9 +1958,9 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
     _draw_pdf_text(
         c,
         _contract_suffix(metadata.get('item_contract', '')),
-        583,
+        592,
         442,
-        85,
+        76,
         8,
     )
     _draw_pdf_text(c, metadata.get('state_job', ''), 678, 442, 80, 7.5)
@@ -2027,12 +2027,12 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
     if measurement_type == 'Estimated progress measurement':
         c.setFont('Helvetica-Bold', 10)
         c.drawString(61, 224, 'X')
-        _draw_pdf_text(c, selected_numbers, 241, 224, 465, 7)
+        _draw_pdf_text(c, selected_numbers, 269, 222, 438, 7)
 
     elif measurement_type == 'Final field measurement':
         c.setFont('Helvetica-Bold', 10)
         c.drawString(61, 204, 'X')
-        _draw_pdf_text(c, selected_numbers, 200, 204, 506, 7)
+        _draw_pdf_text(c, selected_numbers, 226, 202, 480, 7)
 
     # Remarks and optional COGO statement, entirely inside the remarks box.
     remarks_parts = []
@@ -2060,8 +2060,8 @@ def _build_flat_bc628_overlay(metadata, idr_info, rows):
         168,
         730,
         102,
-        size=6.7,
-        leading=7.6,
+        size=8.7,
+        leading=10.0,
     )
 
     # Replace the static printed date from the flattened template.
